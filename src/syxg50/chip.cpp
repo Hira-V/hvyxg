@@ -6,6 +6,11 @@
 #include <algorithm>
 #include <climits>
 #include <cstdint>
+#include <cstddef>
+#include <initializer_list>
+#if defined(HVYXG_CHECK_CONTROL)
+#include <cstdio>
+#endif
 #include <cmath>
 #include <numbers>
 
@@ -274,7 +279,7 @@ void ChipVoice::decay_setup(const RateTables& rt) {
 
 void ChipVoice::aeg_step() {
     env_prev_ = env_;
-    reached_ = false;
+    reached_ = 0;
     switch (state_) {
     case 0:
         if (glide(x_, 0, step_a_)) state_ = 3;
@@ -319,15 +324,10 @@ void ChipVoice::update_gains(std::int32_t am) {
 }
 
 void ChipVoice::fetch(const RateTables& rt, Interpolation interp, float* out) {
-    // Fetch routines (linear, the DLL), plus a 4-point Hermite option.
-    // Pitch: inc += ((PMD · lfo) >> shift) · inc >> 11, once per block.
-    const std::int32_t pm =
-        static_cast<std::int32_t>((lfo_tri_ ? kLfoTri : kLfoSaw)[lfo_phase_ >> 18] ^ lfo_phase_);
-    const int shift = lfo_tri_ ? 18 : 19;
-    const std::int64_t inc15 = std::clamp<std::int64_t>(
-        inc_ + ((static_cast<std::int64_t>((pmd_ * pm) >> shift) * inc_) >> 11), 0, 1 << 22);
+    // Fetch routines (linear, the DLL), plus a 4-point Hermite option, at the block's increment
+    // (control: the pitch LFO applied).
     (void)rt;
-    const auto inc = static_cast<std::uint64_t>(inc15) << 17;
+    const auto inc = static_cast<std::uint64_t>(static_cast<std::uint32_t>(inc15_)) << 17;
     const auto inc_int = static_cast<std::int32_t>(inc >> 32);
     const auto inc_frac = static_cast<std::uint32_t>(inc);
     // The walk and the interpolation: the resample kernel (accel/kernels.hpp).
@@ -341,27 +341,32 @@ void ChipVoice::fetch(const RateTables& rt, Interpolation interp, float* out) {
     w.loop_frac = loop_frac_;
     w.pos = pos_;
     w.frac = frac_;
-    w.ended = ended_;
+    w.ended = ended_before_;
+    const bool aeg_ended = ended_ && !ended_before_;   // control's AEG step ended the voice this block
     accel::resample50(w, inc_int, inc_frac, interp != Interpolation::Linear, out, kBlock);
     pos_ = w.pos;
     frac_ = w.frac;
-    ended_ = w.ended;
+    ended_ = w.ended || aeg_ended;
 }
 
-bool ChipVoice::render_begin(const RateTables& rt, Interpolation interp, float* x, SvfStep& svf) {
-    if (!active_) return false;
+void ChipVoice::control(const RateTables& rt) {
+    // The samples (signal) are fetched as before this block's AEG step, which may end the voice.
+    ended_before_ = ended_;
     // LFO: values from the current phase, then advance.
     const std::uint32_t q = lfo_phase_ >> 18;
     const auto am = static_cast<std::int32_t>((lfo_tri_ ? kLfoTriUni : kLfoSawUni)[q] ^ lfo_phase_);
-
-    fetch(rt, interp, x);
+    // Pitch: inc += ((PMD · lfo) >> shift) · inc >> 11, once per block.
+    const std::int32_t pm = static_cast<std::int32_t>((lfo_tri_ ? kLfoTri : kLfoSaw)[q] ^ lfo_phase_);
+    const int shift = lfo_tri_ ? 18 : 19;
+    inc15_ = static_cast<std::int32_t>(std::clamp<std::int64_t>(
+        inc_ + ((static_cast<std::int64_t>((pmd_ * pm) >> shift) * inc_) >> 11), 0, 1 << 22));
     lfo_phase_ = (lfo_phase_ + static_cast<std::uint32_t>(lfo_step_)) & 0xfffff;
 
     // Cutoff.
     glide(cut_cur_, cut_tgt_, rt.decay[static_cast<std::size_t>(cut_glide_rate_)]);
     f_prev_ = f_new_;
     // The filter LFO uses the unipolar wave (`[0x44]`), so it only lowers the cutoff.
-    f_new_ = svf_f(cut_cur_ - ((fmd_ * am) >> (lfo_tri_ ? 4 : 5)));
+    f_new_ = svf_f_memo(cut_cur_ - ((fmd_ * am) >> (lfo_tri_ ? 4 : 5)));
 
     aeg_step();
 
@@ -372,7 +377,110 @@ bool ChipVoice::render_begin(const RateTables& rt, Interpolation interp, float* 
     glide(pan_r_cur_, pan_r_tgt_, lstep);
     g_prev_ = g_new_;
     update_gains((amd_ * am) >> (lfo_tri_ ? 5 : 6));
+    // The mix: gain × envelope ramps linearly from the block start to its end.
+    for (std::size_t b = 0; b < 7; ++b) {
+        mix_from_[b] = g_prev_[b] * env_prev_;
+        mix_to_[b] = g_new_[b] * env_;
+    }
+}
 
+void ChipVoice::from_lanes(const accel::Lanes50& L, std::size_t i) {
+    // (the kernel wrote the rest in place)
+    ended_before_ = ended_;
+    if (L.done[i]) ended_ = done_ = true;
+    if (L.need_f[i]) f_new_ = svf_f_memo(L.v[i]);
+}
+
+namespace {
+/// Offsets each 4 past the one before, from `first`.
+constexpr bool run_ok(std::size_t first, std::initializer_list<std::size_t> rest) {
+    std::size_t at = first;
+    for (const std::size_t o : rest) {
+        if (o != at + 4) return false;
+        at = o;
+    }
+    return true;
+}
+} // namespace
+
+// The kernel reaches the voices' fields by offset (ChipVoice is not standard-layout, but has no virtual
+// bases: GCC and Clang give offsetof its plain meaning).
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Winvalid-offsetof"
+const accel::Fields50& ChipVoice::fields_50() {
+#define O(f) offsetof(ChipVoice, f)
+    static_assert(run_ok(O(lfo_phase_), {O(lfo_step_), O(lfo_tri_), O(amd_), O(fmd_), O(pmd_), O(inc_), O(inc15_)}));
+    static_assert(run_ok(O(cut_cur_), {O(cut_tgt_), O(cut_glide_rate_), O(f_v_), O(f_of_v_), O(f_prev_), O(f_new_)}));
+    static_assert(run_ok(O(state_), {O(x_), O(hold_), O(init_level_), O(target_), O(step_a_), O(step_d_), O(reached_)}));
+    static_assert(run_ok(O(env_prev_), {O(env_), O(slope_), O(offset_)}));
+    static_assert(run_ok(O(level_cur_), {O(level_tgt_), O(pan_l_cur_), O(pan_l_tgt_), O(pan_r_cur_), O(pan_r_tgt_), O(dry_), O(rev_)}));
+    static_assert(run_ok(O(cho_), {O(var_)}));
+    static_assert(O(g_new_) == O(g_prev_) + 28 && O(mix_from_) == O(g_new_) + 28 && O(mix_to_) == O(mix_from_) + 28);
+    static const accel::Fields50 f{static_cast<std::uint32_t>(O(lfo_phase_)), static_cast<std::uint32_t>(O(cut_cur_)),
+                                   static_cast<std::uint32_t>(O(state_)),     static_cast<std::uint32_t>(O(env_prev_)),
+                                   static_cast<std::uint32_t>(O(level_cur_)), static_cast<std::uint32_t>(O(cho_)),
+                                   static_cast<std::uint32_t>(O(g_prev_))};
+#undef O
+    return f;
+}
+#pragma GCC diagnostic pop
+static_assert(sizeof(int) == 4 && sizeof(float) == 4);
+
+accel::ControlTables50 ChipVoice::control_tables(const RateTables& rt) {
+    accel::ControlTables50 t;
+    t.decay = rt.decay.data();
+    t.lfo_saw = kLfoSaw.data();
+    t.lfo_tri = kLfoTri.data();
+    t.lfo_saw_uni = kLfoSawUni.data();
+    t.lfo_tri_uni = kLfoTriUni.data();
+    t.level_step = rt.decay[kLevelGlideRate];
+    t.lin_m48 = lin(0x80000);
+    t.rate_44k = rt.rate_ratio == 1.0f;
+    return t;
+}
+
+#if defined(HVYXG_CHECK_CONTROL)
+bool ChipVoice::differs_from(const ChipVoice& r, const char* where) const {
+    bool bad = false;
+    const auto chk = [&](const char* name, double a, double b) {
+        if (a != b && !(a != a && b != b)) {
+            std::fprintf(stderr, "%s: %s kernel %.9g reference %.9g\n", where, name, a, b);
+            bad = true;
+        }
+    };
+    chk("lfo_phase", lfo_phase_, r.lfo_phase_);
+    chk("inc15", inc15_, r.inc15_);
+    chk("cut_cur", cut_cur_, r.cut_cur_);
+    chk("f_v", f_v_, r.f_v_);
+    chk("f_of_v", f_of_v_, r.f_of_v_);
+    chk("f_prev", f_prev_, r.f_prev_);
+    chk("f_new", f_new_, r.f_new_);
+    chk("state", state_, r.state_);
+    chk("x", x_, r.x_);
+    chk("hold", hold_, r.hold_);
+    chk("init_level", init_level_, r.init_level_);
+    chk("target", target_, r.target_);
+    chk("reached", reached_, r.reached_);
+    chk("env_prev", env_prev_, r.env_prev_);
+    chk("env", env_, r.env_);
+    chk("ended", ended_, r.ended_);
+    chk("done", done_, r.done_);
+    chk("level_cur", level_cur_, r.level_cur_);
+    chk("pan_l_cur", pan_l_cur_, r.pan_l_cur_);
+    chk("pan_r_cur", pan_r_cur_, r.pan_r_cur_);
+    for (std::size_t b = 0; b < 7; ++b) {
+        chk("g_prev", g_prev_[b], r.g_prev_[b]);
+        chk("g_new", g_new_[b], r.g_new_[b]);
+        chk("mix_from", mix_from_[b], r.mix_from_[b]);
+        chk("mix_to", mix_to_[b], r.mix_to_[b]);
+    }
+    if (bad) std::fprintf(stderr, "%s: state %d tri %d\n", where, r.state_, lfo_tri_);
+    return bad;
+}
+#endif
+
+void ChipVoice::signal(const RateTables& rt, Interpolation interp, float* x, SvfStep& svf) {
+    fetch(rt, interp, x);
     // The filter's block: a Chamberlin low-pass, f ramping linearly over the block (run by the caller,
     // across a batch of voices: accel::svf50_lanes).
     svf.band = &band_;
@@ -380,28 +488,26 @@ bool ChipVoice::render_begin(const RateTables& rt, Interpolation interp, float* 
     svf.f = f_prev_;
     svf.df = (f_new_ - f_prev_) * (1.0f / 128.0f);
     svf.q = q_;
-    return true;
 }
 
 void ChipVoice::render_end(Buses& buses, float* x) {
     eq.process(x, kBlock);
     const bool faded = steal_fade_.apply(x, kBlock);
 
-    // Mix: gain × envelope ramps linearly from the block start to its end.
     const bool chained = chain_ >= 0 && static_cast<std::size_t>(chain_) < buses.chains;
     const auto c = static_cast<std::size_t>(chained ? chain_ : 0);
     std::array<Buses::Channel*, 7> bus{chained ? &buses.chain_l[c] : &buses.dry_l,
                                        chained ? &buses.chain_r[c] : &buses.dry_r,
                                        &buses.reverb,   &buses.chorus_l, &buses.chorus_r,
                                        &buses.variation_l, &buses.variation_r};
-    // The buses that receive anything, mixed in one pass: their gain ramps are independent
-    // add chains, which then overlap (the same operations per bus as one loop per bus).
+    // The buses that receive anything, mixed in one pass: their gain ramps are independent add
+    // chains, which then overlap (the same operations per bus as one loop per bus).
     std::array<float*, 7> dst{};
     std::array<float, 7> g{}, dg{};
     std::size_t k = 0;
     for (std::size_t b = 0; b < bus.size(); ++b) {
-        const float g0 = g_prev_[b] * env_prev_;
-        const float g1 = g_new_[b] * env_;
+        const float g0 = mix_from_[b];
+        const float g1 = mix_to_[b];
         if (g0 == 0.0f && g1 == 0.0f) continue;
         dst[k] = bus[b]->data();
         g[k] = g0;
@@ -414,7 +520,9 @@ void ChipVoice::render_end(Buses& buses, float* x) {
 void ChipVoice::render(Buses& buses, const RateTables& rt, Interpolation interp) {
     std::array<float, kBlock> x{};
     SvfStep svf;
-    if (!render_begin(rt, interp, x.data(), svf)) return;
+    if (!begin()) return;
+    control(rt);
+    signal(rt, interp, x.data(), svf);
     accel::svf50(*svf.band, *svf.low, svf.f, svf.df, svf.q, x.data(), kBlock);
     render_end(buses, x.data());
 }

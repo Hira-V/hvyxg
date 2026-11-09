@@ -12,6 +12,7 @@
 #include <optional>
 #include <vector>
 
+#include "accel/control_50.hpp"
 #include "accel/kernels.hpp"
 #include "bank_impl.hpp"
 #include "module.hpp"
@@ -126,8 +127,14 @@ private:
         std::array<std::array<float, kBlock>, accel::kBatch> rows{};
         std::array<Voice*, accel::kBatch> voice{};
         std::array<ChipVoice::SvfStep, accel::kBatch> svf{};
+        std::size_t n = 0;           // its voices
+        accel::Lanes50 lanes{};      // the batch's control, where a target has a kernel for it
+#if defined(HVYXG_CHECK_CONTROL)
+        std::array<ChipVoice, accel::kBatch> check{};   // the voices before the kernel, for the reference
+#endif
     };
-    std::unique_ptr<Batch> batch_ = std::make_unique<Batch>();
+    /// Two: one's control in flight while the other is finished (render).
+    std::array<std::unique_ptr<Batch>, 2> batch_{std::make_unique<Batch>(), std::make_unique<Batch>()};
     /// Free voice indices, a FIFO: 0, 1, … at
     /// power-on; a note takes the head, a voice that ends or is
     /// stolen goes to the tail.

@@ -169,6 +169,15 @@ limit: `c.mid` 8.08 % → 6.44 % of an X280 core (linear). 128 sustained voices,
 now the limit: 0.141 % → 0.150 % a voice (0.153 % without the kernel). Next: less vector work (the
 resampler and the peak are the largest), and `controls()` / filling the lanes, still scalar.
 
+**The S-YXG50 (2026-11-09):** the same restructure -- ChipVoice's block in begin / control / signal /
+end, its control fields in runs, two batches in flight -- took a voice from about 0.085 % to 0.065 % of
+an X280 core (128 voices, 48 kHz), exact. Its control kernel (`accel::control_50`, exact: 0 differences
+lane by lane at 44.1 and 48 kHz and in MU mode) does not pay there -- the S-YXG50's control is light,
+and its time is in the resampler's 8-bit gathers and conversion and the filter -- so it is opt-in
+(`HVYXG_CONTROL_50`), kept for targets where it may (the C920). At 48 kHz a cutoff that moves still
+costs a scalar asin and sin a block (svf_f, remembered while it holds still). The shared RVV helpers are
+`src/accel/lanes_rvv.hpp`.
+
 **(Superseded) the voices' state in lanes for good.** The per-block state lives in structure-of-arrays form in
 the module (one array per field, indexed by voice object), DspVoice reaching its fields there: the
 kernel then reads and writes unit-stride (16 lanes in a couple of cycles, not 16), over all objects at
