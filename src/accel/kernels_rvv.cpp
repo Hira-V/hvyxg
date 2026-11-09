@@ -270,32 +270,191 @@ void mix_ramps(const float* x, float* const* dst, const float* g, const float* d
     }
 }
 
-void svf50_lanes(float* x, std::size_t stride, float* const* band, float* const* low, const float* f, const float* df,
-                 const float* q, std::size_t lanes, std::size_t n) {
-    // A voice a lane, the samples in time: lane l's sample i at x[l·stride + i] (a strided load and
-    // store). Each lane does the reference's operations in its order, unfused, f stepping by df after
-    // each sample as the reference's does: exact.
+namespace {
+
+// A recursive-in-time filter across voices: lane l is voice l, its block at x + l·stride, its two state
+// words at *s1[l], *s2[l]. Step(x, s1, s2, f, q, vl) -> y updates the state and gives the output; f steps
+// by df after each sample, as the references' do. RVV 1.0 reads and writes four consecutive samples of
+// every lane in one strided segment access (vlsseg4 / vssseg4: a lane's samples are contiguous in its
+// row), instead of an element per sample; 0.7.1 takes the plain strided path.
+template <class Step>
+void lanes_filter(float* x, std::size_t stride, float* const* s1, float* const* s2, const float* f, const float* df,
+                  const float* q, std::size_t lanes, std::size_t n, Step step) {
     const std::ptrdiff_t sb = static_cast<std::ptrdiff_t>(stride * sizeof(float));
     for (std::size_t l0 = 0, vl; l0 < lanes; l0 += vl) {
         vl = __riscv_vsetvl_e32m2(lanes - l0);
-        alignas(64) float bb[kBatch], ll[kBatch];
-        for (std::size_t j = 0; j < vl; ++j) bb[j] = *band[l0 + j], ll[j] = *low[l0 + j];
-        vfloat32m2_t b = __riscv_vle32_v_f32m2(bb, vl), lo = __riscv_vle32_v_f32m2(ll, vl);
+        alignas(64) float a1[kBatch], a2[kBatch];
+        for (std::size_t j = 0; j < vl; ++j) a1[j] = *s1[l0 + j], a2[j] = *s2[l0 + j];
+        vfloat32m2_t v1 = __riscv_vle32_v_f32m2(a1, vl), v2 = __riscv_vle32_v_f32m2(a2, vl);
         vfloat32m2_t fv = __riscv_vle32_v_f32m2(f + l0, vl);
         const vfloat32m2_t dfv = __riscv_vle32_v_f32m2(df + l0, vl), qv = __riscv_vle32_v_f32m2(q + l0, vl);
         float* col = x + l0 * stride;
-        for (std::size_t i = 0; i < n; ++i, ++col) {
-            const vfloat32m2_t xv = __riscv_vlse32_v_f32m2(col, sb, vl);
-            // b += f (x - q b - l); l += f b; x = l; f += df
-            const vfloat32m2_t e = __riscv_vfsub_vv_f32m2(__riscv_vfsub_vv_f32m2(xv, __riscv_vfmul_vv_f32m2(qv, b, vl), vl), lo, vl);
-            b = __riscv_vfadd_vv_f32m2(b, __riscv_vfmul_vv_f32m2(fv, e, vl), vl);
-            lo = __riscv_vfadd_vv_f32m2(lo, __riscv_vfmul_vv_f32m2(fv, b, vl), vl);
-            __riscv_vsse32_v_f32m2(col, sb, lo, vl);
+        std::size_t i = 0;
+#if !defined(__riscv_xtheadvector)
+        for (; i + 4 <= n; i += 4, col += 4) {
+            vfloat32m2x4_t t = __riscv_vlsseg4e32_v_f32m2x4(col, sb, vl);
+            vfloat32m2_t y0 = step(__riscv_vget_v_f32m2x4_f32m2(t, 0), v1, v2, fv, qv, vl);
+            fv = __riscv_vfadd_vv_f32m2(fv, dfv, vl);
+            vfloat32m2_t y1 = step(__riscv_vget_v_f32m2x4_f32m2(t, 1), v1, v2, fv, qv, vl);
+            fv = __riscv_vfadd_vv_f32m2(fv, dfv, vl);
+            vfloat32m2_t y2 = step(__riscv_vget_v_f32m2x4_f32m2(t, 2), v1, v2, fv, qv, vl);
+            fv = __riscv_vfadd_vv_f32m2(fv, dfv, vl);
+            vfloat32m2_t y3 = step(__riscv_vget_v_f32m2x4_f32m2(t, 3), v1, v2, fv, qv, vl);
+            fv = __riscv_vfadd_vv_f32m2(fv, dfv, vl);
+            t = __riscv_vset_v_f32m2_f32m2x4(t, 0, y0);
+            t = __riscv_vset_v_f32m2_f32m2x4(t, 1, y1);
+            t = __riscv_vset_v_f32m2_f32m2x4(t, 2, y2);
+            t = __riscv_vset_v_f32m2_f32m2x4(t, 3, y3);
+            __riscv_vssseg4e32_v_f32m2x4(col, sb, t, vl);
+        }
+#endif
+        for (; i < n; ++i, ++col) {
+            const vfloat32m2_t y = step(__riscv_vlse32_v_f32m2(col, sb, vl), v1, v2, fv, qv, vl);
+            __riscv_vsse32_v_f32m2(col, sb, y, vl);
             fv = __riscv_vfadd_vv_f32m2(fv, dfv, vl);
         }
-        __riscv_vse32_v_f32m2(bb, b, vl);
-        __riscv_vse32_v_f32m2(ll, lo, vl);
-        for (std::size_t j = 0; j < vl; ++j) *band[l0 + j] = bb[j], *low[l0 + j] = ll[j];
+        __riscv_vse32_v_f32m2(a1, v1, vl);
+        __riscv_vse32_v_f32m2(a2, v2, vl);
+        for (std::size_t j = 0; j < vl; ++j) *s1[l0 + j] = a1[j], *s2[l0 + j] = a2[j];
+    }
+}
+
+} // namespace
+
+void svf50_lanes(float* x, std::size_t stride, float* const* band, float* const* low, const float* f, const float* df,
+                 const float* q, std::size_t lanes, std::size_t n) {
+    // b += f (x - q b - l); l += f b; y = l -- the reference's operations in its order, unfused: exact.
+    lanes_filter(x, stride, band, low, f, df, q, lanes, n,
+                 [](vfloat32m2_t xv, vfloat32m2_t& b, vfloat32m2_t& lo, vfloat32m2_t fv, vfloat32m2_t qv, std::size_t vl) {
+                     const vfloat32m2_t e = __riscv_vfsub_vv_f32m2(__riscv_vfsub_vv_f32m2(xv, __riscv_vfmul_vv_f32m2(qv, b, vl), vl), lo, vl);
+                     b = __riscv_vfadd_vv_f32m2(b, __riscv_vfmul_vv_f32m2(fv, e, vl), vl);
+                     lo = __riscv_vfadd_vv_f32m2(lo, __riscv_vfmul_vv_f32m2(fv, b, vl), vl);
+                     return lo;
+                 });
+}
+
+void svf_le_lanes(float* x, std::size_t stride, float* const* lp, float* const* bp, const float* f, const float* df,
+                  const float* q, std::size_t lanes, std::size_t n) {
+    // qq = min(q, max(3 - 2f, 2 - f)); y = lp; bp += f (x - qq bp - lp); lp += f bp -- exact, as above.
+    lanes_filter(x, stride, bp, lp, f, df, q, lanes, n,
+                 [](vfloat32m2_t xv, vfloat32m2_t& b, vfloat32m2_t& lo, vfloat32m2_t fv, vfloat32m2_t qv, std::size_t vl) {
+                     const vfloat32m2_t lim = __riscv_vfmax_vv_f32m2(__riscv_vfrsub_vf_f32m2(__riscv_vfmul_vf_f32m2(fv, 2.0f, vl), 3.0f, vl),
+                                                                     __riscv_vfrsub_vf_f32m2(fv, 2.0f, vl), vl);
+                     const vfloat32m2_t qq = __riscv_vfmin_vv_f32m2(qv, lim, vl);
+                     const vfloat32m2_t y = lo;
+                     const vfloat32m2_t e = __riscv_vfsub_vv_f32m2(__riscv_vfsub_vv_f32m2(xv, __riscv_vfmul_vv_f32m2(qq, b, vl), vl), lo, vl);
+                     b = __riscv_vfadd_vv_f32m2(b, __riscv_vfmul_vv_f32m2(fv, e, vl), vl);
+                     lo = __riscv_vfadd_vv_f32m2(lo, __riscv_vfmul_vv_f32m2(fv, b, vl), vl);
+                     return y;
+                 });
+}
+
+void peak_ramp(const float* x, float a, float d, float* peak, std::size_t n) {
+    // max(*peak, |(a + i·d) · x[i]|), the ramp in closed form (the reference adds d sample by sample).
+    // The reference's max(hi, -lo) -- hi from *peak, lo from 0 -- is max(*peak, max |y|): one reduction.
+    // The result is stored from the vector unit: a scalar read (vfmv.f.s) would wait for every vector
+    // instruction before it, the resampler's gathers included.
+    vfloat32m1_t m = __riscv_vle32_v_f32m1(peak, 1);
+    for (std::size_t i = 0, vl; i < n; i += vl) {
+        vl = __riscv_vsetvl_e32m2(n - i);
+        const vfloat32m2_t iv = __riscv_vfcvt_f_xu_v_f32m2(__riscv_vadd_vx_u32m2(__riscv_vid_v_u32m2(vl), static_cast<std::uint32_t>(i), vl), vl);
+        const vfloat32m2_t av = __riscv_vfmacc_vf_f32m2(__riscv_vfmv_v_f_f32m2(a, vl), d, iv, vl);
+        m = __riscv_vfredmax_vs_f32m2_f32m1(__riscv_vfabs_v_f32m2(__riscv_vfmul_vv_f32m2(av, __riscv_vle32_v_f32m2(x + i, vl), vl), vl), m, vl);
+    }
+    __riscv_vse32_v_f32m1(peak, m, 1);
+}
+
+namespace {
+// The S-YXG2006LE's run: m samples of its walk, all inside the direct range, into out. Linear: s0, s1 in
+// one segmented gather (16-bit, signed), the 10-bit weight; Hermite: the four points, the same
+// polynomial as the S-YXG50's. Exact. Positions relative to the run's start fit 32 bits (the caller
+// checks the step).
+void segment_le(const WalkLE& w, std::int32_t inc, bool hermite, float* out, std::size_t m) {
+    const std::int16_t* base = w.base + w.pos - (hermite ? 1 : 0);
+    const auto frac = static_cast<std::uint32_t>(w.frac), uinc = static_cast<std::uint32_t>(inc);
+    for (std::size_t k = 0, vl; k < m; k += vl) {
+        vl = __riscv_vsetvl_e32m2(m - k);
+        const vuint32m2_t acc = __riscv_vadd_vx_u32m2(__riscv_vmul_vx_u32m2(__riscv_vadd_vx_u32m2(__riscv_vid_v_u32m2(vl),
+                                                                            static_cast<std::uint32_t>(k), vl), uinc, vl), frac, vl);
+        const vuint32m2_t off = __riscv_vsll_vx_u32m2(__riscv_vsrl_vx_u32m2(acc, kPhaseBitsLE, vl), 1, vl);   // bytes
+        const vuint32m2_t fr = __riscv_vand_vx_u32m2(acc, (1u << kPhaseBitsLE) - 1, vl);
+        vfloat32m2_t y;
+#if defined(__riscv_xtheadvector)
+        alignas(64) std::uint32_t offs[256];
+        alignas(64) std::int16_t pts[4][256];
+        __riscv_vse32_v_u32m2(offs, off, vl);
+        const std::size_t np = hermite ? 4 : 2;
+        for (std::size_t j = 0; j < vl; ++j)
+            for (std::size_t p = 0; p < np; ++p) pts[p][j] = base[offs[j] / 2 + p];
+        const auto pt = [&](std::size_t p) { return __riscv_vfwcvt_f_x_v_f32m2(__riscv_vle16_v_i16m1(pts[p], vl), vl); };
+        if (hermite) {
+            y = hermite4(pt(0), pt(1), pt(2), pt(3), __riscv_vfmul_vf_f32m2(__riscv_vfcvt_f_xu_v_f32m2(fr, vl), 1.0f / 32768.0f, vl), vl);
+        } else {
+            const vfloat32m2_t s0 = pt(0), s1 = pt(1);
+#else
+        if (hermite) {
+            const vint16m1x4_t p4 = __riscv_vluxseg4ei32_v_i16m1x4(base, off, vl);
+            y = hermite4(__riscv_vfwcvt_f_x_v_f32m2(__riscv_vget_v_i16m1x4_i16m1(p4, 0), vl),
+                         __riscv_vfwcvt_f_x_v_f32m2(__riscv_vget_v_i16m1x4_i16m1(p4, 1), vl),
+                         __riscv_vfwcvt_f_x_v_f32m2(__riscv_vget_v_i16m1x4_i16m1(p4, 2), vl),
+                         __riscv_vfwcvt_f_x_v_f32m2(__riscv_vget_v_i16m1x4_i16m1(p4, 3), vl),
+                         __riscv_vfmul_vf_f32m2(__riscv_vfcvt_f_xu_v_f32m2(fr, vl), 1.0f / 32768.0f, vl), vl);
+        } else {
+            const vint16m1x2_t p2 = __riscv_vluxseg2ei32_v_i16m1x2(base, off, vl);
+            const vfloat32m2_t s0 = __riscv_vfwcvt_f_x_v_f32m2(__riscv_vget_v_i16m1x2_i16m1(p2, 0), vl);
+            const vfloat32m2_t s1 = __riscv_vfwcvt_f_x_v_f32m2(__riscv_vget_v_i16m1x2_i16m1(p2, 1), vl);
+#endif
+            // w1 = 32 (frac >> 5) / 32768; v = s0 + (s1 - s0) w1
+            const vfloat32m2_t w1 = __riscv_vfmul_vf_f32m2(__riscv_vfcvt_f_xu_v_f32m2(__riscv_vsll_vx_u32m2(__riscv_vsrl_vx_u32m2(fr, 5, vl), 5, vl), vl),
+                                                           1.0f / 32768.0f, vl);
+            y = __riscv_vfadd_vv_f32m2(s0, __riscv_vfmul_vv_f32m2(__riscv_vfsub_vv_f32m2(s1, s0, vl), w1, vl), vl);
+        }
+        __riscv_vse32_v_f32m2(out + k, y, vl);
+    }
+}
+} // namespace
+
+void resample_le(WalkLE& w, std::int32_t inc, InterpLE interp, const float* lanczos, float* out, std::size_t n) {
+    // Lanczos (an HQ option: six table weights a sample) stays the reference's for now; a step whose
+    // 128 lanes' fractions could pass 32 bits likewise.
+    if (interp == InterpLE::Lanczos || inc < 0 || inc > (1 << 24)) {
+        ref::resample_le(w, inc, interp, lanczos, out, n);
+        return;
+    }
+    const bool hermite = interp == InterpLE::Hermite;
+    const std::int64_t lo = hermite ? 1 : 0, hi = hermite ? 2 : 1;
+    std::size_t k = 0;
+    while (k < n) {
+        if (w.ended) {
+            for (; k < n; ++k) out[k] = 0.0f;
+            return;
+        }
+        // the run whose points all lie inside [-pre_loop, loop_len): positions below loop_len - hi
+        std::size_t m = 0;
+        if (w.pos - lo >= -w.pre_loop && w.pos < w.loop_len - hi && inc > 0) {
+            const std::uint64_t room = (static_cast<std::uint64_t>(w.loop_len - hi - w.pos) << kPhaseBitsLE) - static_cast<std::uint64_t>(w.frac);
+            const std::uint64_t r = (room + static_cast<std::uint64_t>(inc) - 1) / static_cast<std::uint64_t>(inc);
+            m = r < n - k ? static_cast<std::size_t>(r) : n - k;
+        } else if (w.pos - lo >= -w.pre_loop && w.pos < w.loop_len - hi && inc == 0) {
+            m = n - k;
+        }
+        if (m == 0) {
+            ref::resample_le(w, inc, interp, lanczos, out + k, 1);
+            ++k;
+            continue;
+        }
+        segment_le(w, inc, hermite, out + k, m);
+        const std::uint64_t acc = static_cast<std::uint64_t>(w.frac) + static_cast<std::uint64_t>(m) * static_cast<std::uint64_t>(inc);
+        w.pos += static_cast<std::int64_t>(acc >> kPhaseBitsLE);
+        w.frac = static_cast<std::int32_t>(acc & ((1u << kPhaseBitsLE) - 1));
+        while (w.pos >= w.loop_len) {
+            if (w.one_shot) {
+                w.ended = true;
+                break;
+            }
+            w.pos -= w.loop_len;
+        }
+        k += m;
     }
 }
 

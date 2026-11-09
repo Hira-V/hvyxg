@@ -31,7 +31,35 @@ struct Walk50 {
     bool ended = false;
 };
 
+/// The S-YXG2006LE's sample walk (syxg2006le::DspVoice): signed 16-bit samples, index 0 the loop start
+/// (negative: the pre-loop), a 15-bit fraction.
+struct WalkLE {
+    const std::int16_t* base = nullptr;
+    std::int64_t pre_loop = 0, loop_len = 0;
+    bool one_shot = false;
+    std::int64_t pos = 0;
+    std::int32_t frac = 0;          // kPhaseBits (15) of fraction
+    bool ended = false;
+};
+inline constexpr int kPhaseBitsLE = 15;
+/// The S-YXG2006LE's interpolations; Lanczos reads 6 weights a 1/256 step (257 rows of 6 floats).
+enum class InterpLE : std::uint8_t { Linear, Hermite, Lanczos };
+
 namespace ref {
+
+/// The S-YXG2006LE's samples: n of the walk at a step of inc / 2^15, into out (16-bit units); 0 once the
+/// walk has ended. Advances w.
+void resample_le(WalkLE& w, std::int32_t inc, InterpLE interp, const float* lanczos, float* out, std::size_t n);
+
+/// The S-YXG2006LE's filter (syxg2006le::Svf) for `lanes` voices side by side, as svf50_lanes: per
+/// sample q clamped to min(q, max(3 - 2f, 2 - f)), the output one sample late (the low-pass before the
+/// update), f stepping by df.
+void svf_le_lanes(float* x, std::size_t stride, float* const* lp, float* const* bp, const float* f, const float* df,
+                  const float* q, std::size_t lanes, std::size_t n);
+
+/// The steal score's peak, in place: *peak = max(*peak, |a · x[i]|) over the block, a stepping by d
+/// after each sample. (In place, so a vector unit can store it without the scalar core waiting for it.)
+void peak_ramp(const float* x, float a, float d, float* peak, std::size_t n);
 
 /// n samples of the walk at a step of inc_int + inc_frac / 2^32, linear (the DLL's) or 4-point Hermite,
 /// into out; 0 once the walk has ended. Advances w.
@@ -57,6 +85,10 @@ void resample50(Walk50& w, std::int32_t inc_int, std::uint32_t inc_frac, bool he
 void mix_ramps(const float* x, float* const* dst, const float* g, const float* dg, std::size_t buses, std::size_t n);
 void svf50_lanes(float* x, std::size_t stride, float* const* band, float* const* low, const float* f, const float* df,
                  const float* q, std::size_t lanes, std::size_t n);
+void resample_le(WalkLE& w, std::int32_t inc, InterpLE interp, const float* lanczos, float* out, std::size_t n);
+void svf_le_lanes(float* x, std::size_t stride, float* const* lp, float* const* bp, const float* f, const float* df,
+                  const float* q, std::size_t lanes, std::size_t n);
+void peak_ramp(const float* x, float a, float d, float* peak, std::size_t n);
 } // namespace rvv
 #endif
 
@@ -84,6 +116,29 @@ inline void svf50_lanes(float* x, std::size_t stride, float* const* band, float*
     rvv::svf50_lanes(x, stride, band, low, f, df, q, lanes, n);
 #else
     ref::svf50_lanes(x, stride, band, low, f, df, q, lanes, n);
+#endif
+}
+
+inline void resample_le(WalkLE& w, std::int32_t inc, InterpLE interp, const float* lanczos, float* out, std::size_t n) {
+#if defined(HVYXG_ACCEL_RVV)
+    rvv::resample_le(w, inc, interp, lanczos, out, n);
+#else
+    ref::resample_le(w, inc, interp, lanczos, out, n);
+#endif
+}
+inline void svf_le_lanes(float* x, std::size_t stride, float* const* lp, float* const* bp, const float* f, const float* df,
+                         const float* q, std::size_t lanes, std::size_t n) {
+#if defined(HVYXG_ACCEL_RVV)
+    rvv::svf_le_lanes(x, stride, lp, bp, f, df, q, lanes, n);
+#else
+    ref::svf_le_lanes(x, stride, lp, bp, f, df, q, lanes, n);
+#endif
+}
+inline void peak_ramp(const float* x, float a, float d, float* peak, std::size_t n) {
+#if defined(HVYXG_ACCEL_RVV)
+    rvv::peak_ramp(x, a, d, peak, n);
+#else
+    ref::peak_ramp(x, a, d, peak, n);
 #endif
 }
 

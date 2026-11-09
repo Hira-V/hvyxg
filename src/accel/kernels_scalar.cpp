@@ -4,7 +4,9 @@
 
 #include "accel/kernels.hpp"
 
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstddef>
 
 namespace hvyxg::accel::ref {
@@ -102,6 +104,89 @@ void svf50(float& band, float& low, float f, float df, float q, float* x, std::s
     }
     band = b;
     low = l;
+}
+
+namespace {
+// The S-YXG2006LE's fetch: past the loop end wrapped (a one-shot holds its last sample), below the
+// pre-loop clamped.
+inline float fetch_le(const WalkLE& w, std::int64_t i) {
+    if (i >= w.loop_len) i = w.one_shot ? w.loop_len - 1 : i - w.loop_len;
+    if (i < -w.pre_loop) i = -w.pre_loop;
+    return static_cast<float>(w.base[i]);
+}
+inline float hermite_le(float y0, float y1, float y2, float y3, float t) {
+    const float c1 = 0.5f * (y2 - y0);
+    const float c2 = y0 - 2.5f * y1 + 2.0f * y2 - 0.5f * y3;
+    const float c3 = 0.5f * (y3 - y0) + 1.5f * (y1 - y2);
+    return ((c3 * t + c2) * t + c1) * t + y1;
+}
+} // namespace
+
+void resample_le(WalkLE& w, std::int32_t inc, InterpLE interp, const float* lanczos, float* out, std::size_t n) {
+    const std::int64_t last = w.loop_len - 1;
+    for (std::size_t k = 0; k < n; ++k) {
+        if (w.ended) {
+            out[k] = 0.0f;
+            continue;
+        }
+        float v;
+        if (interp == InterpLE::Linear) {
+            // 10-bit weights, w1 = 32·(frac >> 5).
+            const float s0 = static_cast<float>(w.base[w.pos]);
+            const float s1 = w.pos == last ? (w.one_shot ? s0 : static_cast<float>(w.base[0])) : static_cast<float>(w.base[w.pos + 1]);
+            const float w1 = static_cast<float>(32 * (w.frac >> 5)) * (1.0f / 32768.0f);
+            v = s0 + (s1 - s0) * w1;
+        } else {
+            const float fr = static_cast<float>(w.frac) * (1.0f / 32768.0f);
+            if (interp == InterpLE::Hermite) {
+                v = hermite_le(fetch_le(w, w.pos - 1), fetch_le(w, w.pos), fetch_le(w, w.pos + 1), fetch_le(w, w.pos + 2), fr);
+            } else {
+                const float* wt = lanczos + 6 * static_cast<std::size_t>(std::lround(fr * 256));
+                v = 0.0f;
+                for (int j = 0; j < 6; ++j) v += wt[j] * fetch_le(w, w.pos - 2 + j);
+            }
+        }
+        out[k] = v;
+        const std::int32_t acc = w.frac + inc;
+        w.pos += acc >> kPhaseBitsLE;
+        w.frac = acc & ((1 << kPhaseBitsLE) - 1);
+        while (w.pos >= w.loop_len) {
+            if (w.one_shot) {
+                w.ended = true;
+                break;
+            }
+            w.pos -= w.loop_len;
+        }
+    }
+}
+
+void svf_le_lanes(float* x, std::size_t stride, float* const* lp, float* const* bp, const float* f, const float* df,
+                  const float* q, std::size_t lanes, std::size_t n) {
+    for (std::size_t l = 0; l < lanes; ++l) {
+        float lo = *lp[l], b = *bp[l], ff = f[l];
+        float* xs = x + l * stride;
+        for (std::size_t i = 0; i < n; ++i) {
+            const float qq = std::min(q[l], std::max(3.0f - 2.0f * ff, 2.0f - ff));
+            const float out = lo;
+            b += ff * (xs[i] - qq * b - lo);
+            lo += ff * b;
+            xs[i] = out;
+            ff += df[l];
+        }
+        *lp[l] = lo;
+        *bp[l] = b;
+    }
+}
+
+void peak_ramp(const float* x, float a, float d, float* peak, std::size_t n) {
+    float hi = *peak, lo = 0.0f;
+    for (std::size_t i = 0; i < n; ++i) {
+        const float y = a * x[i];
+        if (y > hi) hi = y;
+        else if (y < lo) lo = y;
+        a += d;
+    }
+    *peak = std::max(hi, -lo);
 }
 
 void svf50_lanes(float* x, std::size_t stride, float* const* band, float* const* low, const float* f, const float* df,

@@ -1,6 +1,7 @@
 // Copyright (C) 2026 Kevin H. Patterson
 // SPDX-License-Identifier: BSD-3-Clause (see LICENSE)
 #include "syxg2006le/dsp_voice.hpp"
+#include "accel/kernels.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -729,51 +730,22 @@ void DspVoice::lfo_tick(RateTables& t, const VoiceControls& c, bool gated) {
     l.phase = next;
 }
 
-float DspVoice::fetch(std::int64_t i) const {
-    if (i >= loop_len_) i = one_shot_ ? loop_len_ - 1 : i - loop_len_;
-    if (i < -pre_loop_) i = -pre_loop_;
-    return static_cast<float>(base_[i]);
-}
-
-void DspVoice::render_samples(std::span<float, kBlock> dst, Interpolation interp,
-                              const RateTables& t) {
-    
-    const std::int64_t last = loop_len_ - 1;
-    for (int n = 0; n < kBlock; ++n) {
-        if (sample_ended_) {
-            dst[static_cast<std::size_t>(n)] = 0.0f;
-            continue;
-        }
-        float v;
-        if (interp == Interpolation::Linear) {
-            // 10-bit weights, w1 = 32·(frac >> 5).
-            const float s0 = static_cast<float>(base_[pos_]);
-            const float s1 = pos_ == last ? (one_shot_ ? s0 : static_cast<float>(base_[0]))
-                                          : static_cast<float>(base_[pos_ + 1]);
-            const float w1 = static_cast<float>(32 * (frac_ >> 5)) * (1.0f / 32768.0f);
-            v = s0 + (s1 - s0) * w1;
-        } else {
-            const float fr = static_cast<float>(frac_) * (1.0f / 32768.0f);
-            if (interp == Interpolation::Hermite) {
-                v = hermite(fetch(pos_ - 1), fetch(pos_), fetch(pos_ + 1), fetch(pos_ + 2), fr);
-            } else {
-                const auto& w = t.lanczos.weights(fr);
-                v = 0.0f;
-                for (int k = 0; k < 6; ++k) v += w[static_cast<std::size_t>(k)] * fetch(pos_ - 2 + k);
-            }
-        }
-        dst[static_cast<std::size_t>(n)] = v;
-        const std::int32_t acc = frac_ + inc_;
-        pos_ += acc >> kPhaseBits;
-        frac_ = acc & (kPhaseOne - 1);
-        while (pos_ >= loop_len_) {
-            if (one_shot_) {
-                sample_ended_ = true;
-                break;
-            }
-            pos_ -= loop_len_;
-        }
-    }
+void DspVoice::render_samples(std::span<float, kBlock> dst, Interpolation interp, const RateTables& t) {
+    // The walk and the interpolation: the resample kernel (accel/kernels.hpp).
+    accel::WalkLE w;
+    w.base = base_;
+    w.pre_loop = pre_loop_;
+    w.loop_len = loop_len_;
+    w.one_shot = one_shot_;
+    w.pos = pos_;
+    w.frac = frac_;
+    w.ended = sample_ended_;
+    const auto il = interp == Interpolation::Linear ? accel::InterpLE::Linear
+                    : interp == Interpolation::Hermite ? accel::InterpLE::Hermite : accel::InterpLE::Lanczos;
+    accel::resample_le(w, inc_, il, t.lanczos.data(), dst.data(), dst.size());
+    pos_ = w.pos;
+    frac_ = w.frac;
+    sample_ended_ = w.ended;
 }
 
 float DspVoice::filter_coefficient(const RateTables& t, std::int32_t cutoff, int resonance) const {
@@ -793,43 +765,13 @@ float DspVoice::filter_coefficient(const RateTables& t, std::int32_t cutoff, int
     return std::min(1.0f, static_cast<float>(256 + ((lc >> 8) & 255)) / std::ldexp(1.0f, 24 - (lc >> 16)));
 }
 
-namespace {
-
-/// bus[o][n] += a[o] · x[n], a[o] += d[o] after each sample, for K outputs side by side.
-template <std::size_t K>
-void mix_fixed(const float* x, float* const* bus, const float* a0, const float* d) {
-    std::array<float, K> a{};
-    for (std::size_t o = 0; o < K; ++o) a[o] = a0[o];
-    for (std::size_t n = 0; n < static_cast<std::size_t>(kBlock); ++n)
-        for (std::size_t o = 0; o < K; ++o) {
-            bus[o][n] += a[o] * x[n];
-            a[o] += d[o];
-        }
-}
-
-} // namespace
-
-void DspVoice::mix_ramps(const float* x, float* const* bus, const float* a, const float* d, std::size_t k) {
-    switch (k) {
-    case 0: return;
-    case 1: mix_fixed<1>(x, bus, a, d); return;
-    case 2: mix_fixed<2>(x, bus, a, d); return;
-    case 3: mix_fixed<3>(x, bus, a, d); return;
-    case 4: mix_fixed<4>(x, bus, a, d); return;
-    case 5: mix_fixed<5>(x, bus, a, d); return;
-    case 6: mix_fixed<6>(x, bus, a, d); return;
-    default: mix_fixed<7>(x, bus, a, d); return;
-    }
-}
-
-void DspVoice::render(RateTables& t, const VoiceControls& c, std::array<float*, kOutputs> out,
-                      Interpolation interp) {
+bool DspVoice::render_begin(RateTables& t, const VoiceControls& c, Interpolation interp, float* x, SvfStep& svf) {
     apply_note_off(t);
-    if (state_ == State::Idle) return;
+    if (state_ == State::Idle) return false;
     // 30 ms start gate.
     const bool gated = !step_up(gate_, t.gate_samples, kBlock);
     if (state_ == State::Delay) {
-        if (!(step_up(delay_counter_, delay_target_, kBlock) && !gated)) return;
+        if (!(step_up(delay_counter_, delay_target_, kBlock) && !gated)) return false;
         state_ = State::Running;
     }
     started_ = true;
@@ -858,33 +800,27 @@ void DspVoice::render(RateTables& t, const VoiceControls& c, std::array<float*, 
 
     amp_tick(t);
 
-    // Sample render + filter.
-    std::array<float, kBlock> x{};
-    render_samples(x, interp, t);
+    // Samples, then (by the caller, across a batch of voices) the filter.
+    render_samples(std::span<float, kBlock>(x, kBlock), interp, t);
     // the peak of |EG gain × sample| over the block (gain ramped from the
     // previous block's value), in full-scale units; read by the steal score.
     {
         constexpr float k = 1.0f / 32768.0f;
-        float a = eg_.gain_prev * k;
-        const float d = (eg_.gain * k - a) * (1.0f / kBlock);
-        float hi = peak_, lo = 0.0f;
-        for (const float smp : x) {
-            const float y = a * smp;
-            if (y > hi) hi = y;
-            else if (y < lo) lo = y;
-            a += d;
-        }
-        peak_ = std::max(hi, -lo);
+        const float a = eg_.gain_prev * k;
+        accel::peak_ramp(x, a, (eg_.gain * k - a) * (1.0f / kBlock), &peak_, kBlock);
     }
-    const float df = (f - f_prev_) / kBlock;
-    float ff = f_prev_;
-    for (auto& s : x) {
-        s = svf_.process(s, ff, q_);
-        ff += df;
-    }
+    svf.lp = &svf_.lp;
+    svf.bp = &svf_.bp;
+    svf.f = f_prev_;
+    svf.df = (f - f_prev_) / kBlock;
+    svf.q = q_;
     f_prev_ = f;
-    eq.process(x.data(), kBlock);
-    const bool faded = steal_fade_.apply(x.data(), kBlock);
+    return true;
+}
+
+void DspVoice::render_end(RateTables& t, const VoiceControls& c, std::array<float*, kOutputs> out, float* x) {
+    eq.process(x, kBlock);
+    const bool faded = steal_fade_.apply(x, kBlock);
 
     // Output stage: glide level / pan / sends, then the per-output gains
     // g(pan + send + level + amp LFO); outputs whose send + level + LFO reach 255 units are
@@ -925,7 +861,7 @@ void DspVoice::render(RateTables& t, const VoiceControls& c, std::array<float*, 
             gd[k++] = (target - a) / kBlock;
         }
     }
-    mix_ramps(x.data(), bus.data(), ga.data(), gd.data(), k);
+    accel::mix_ramps(x, bus.data(), ga.data(), gd.data(), k, kBlock);
     gain_prev_ = gain;
 
     if (eg_.finished || sample_ended_ || faded) {
@@ -933,6 +869,15 @@ void DspVoice::render(RateTables& t, const VoiceControls& c, std::array<float*, 
         ended_released_ = released_;
         ended_ = true;
     }
+}
+
+void DspVoice::render(RateTables& t, const VoiceControls& c, std::array<float*, kOutputs> out, Interpolation interp) {
+    std::array<float, kBlock> x{};
+    SvfStep svf;
+    if (!render_begin(t, c, interp, x.data(), svf)) return;
+    float* xp = x.data();
+    accel::svf_le_lanes(xp, kBlock, &svf.lp, &svf.bp, &svf.f, &svf.df, &svf.q, 1, kBlock);
+    render_end(t, c, out, xp);
 }
 
 int DspVoice::score_state() const {

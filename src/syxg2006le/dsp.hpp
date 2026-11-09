@@ -54,6 +54,8 @@ public:
     const std::array<float, 6>& weights(float t) const {
         return table_[static_cast<std::size_t>(std::lround(t * kSteps))];
     }
+    /// The table, kSteps + 1 rows of 6 weights end to end (the resample kernel's).
+    const float* data() const { return table_[0].data(); }
 
 private:
     static double sinc(double x) {

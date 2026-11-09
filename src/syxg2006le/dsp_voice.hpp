@@ -111,6 +111,16 @@ public:
     /// One 64-sample tick, mixed into `out` (one buffer per output).
     void render(RateTables& t, const VoiceControls& c,
                 std::array<float*, kOutputs> out, Interpolation interp);
+    /// One block's filter, for a caller that runs it across voices (accel::svf_le_lanes).
+    struct SvfStep {
+        float* lp = nullptr;
+        float* bp = nullptr;
+        float f = 0.0f, df = 0.0f, q = 1.0f;
+    };
+    /// A tick in three steps, as render() does them: control, the samples into x and the peak (false:
+    /// nothing to render); the filter over x, by the caller (svf); then EQ, fade and the outputs.
+    bool render_begin(RateTables& t, const VoiceControls& c, Interpolation interp, float* x, SvfStep& svf);
+    void render_end(RateTables& t, const VoiceControls& c, std::array<float*, kOutputs> out, float* x);
 
     bool active() const { return state_ != State::Idle; }
     /// Silence the voice at once, keeping its object state (LFO phase) for the next note.
@@ -199,8 +209,7 @@ private:
     void lfo_tick(RateTables& t, const VoiceControls& c, bool gated);
     void render_samples(std::span<float, kBlock> dst, Interpolation interp,
                         const RateTables& t);
-    float fetch(std::int64_t i) const;
-    static void mix_ramps(const float* x, float* const* bus, const float* a, const float* d, std::size_t k);
+
 
     State state_ = State::Idle;
     /// Steal-score state: the signal peak and its reset timer (period

@@ -1034,6 +1034,27 @@ void ToneModule2006::render(Buses& buses) {
         buses.dry_l.data(),    buses.dry_r.data(),    buses.reverb.data(),
         buses.chorus_l.data(), buses.chorus_r.data(), buses.variation_l.data(),
         buses.variation_r.data()};
+    // The voices in batches (as the S-YXG50's): each voice's control and samples (render_begin) in
+    // order -- the shared random generator advanced before each, as ever -- the filter across the batch,
+    // then each voice's EQ, fade and outputs in the same order (render_end).
+    Batch& bt = *batch_;
+    std::size_t nb = 0;
+    const auto flush = [&] {
+        if (!nb) return;
+        std::array<float*, accel::kBatch> lp{}, bp{};
+        std::array<float, accel::kBatch> f{}, df{}, q{};
+        for (std::size_t i = 0; i < nb; ++i) {
+            lp[i] = bt.svf[i].lp, bp[i] = bt.svf[i].bp;
+            f[i] = bt.svf[i].f, df[i] = bt.svf[i].df, q[i] = bt.svf[i].q;
+        }
+        accel::svf_le_lanes(bt.rows[0].data(), kBlock, lp.data(), bp.data(), f.data(), df.data(), q.data(), nb, kBlock);
+        for (std::size_t i = 0; i < nb; ++i) {
+            Obj& o = *bt.obj[i];
+            o.dsp.render_end(tables_, bt.controls[i], bt.out[i], bt.rows[i].data());
+            if (o.dying && !o.dsp.active()) o.busy = o.dying = false;
+        }
+        nb = 0;
+    };
     for (Obj& o : objs_) {
         if (!o.dsp.active()) {
             // A finished fade frees its object; an ended voice keeps its handle's object busy
@@ -1050,9 +1071,16 @@ void ToneModule2006::render(Buses& buses) {
         if (!s.drum) o.dsp.eq.update(eq::voice_settings(ctx_.dll_exact, ctx_.mu_part_eq, *s.part, nullptr, false), ctx_.sample_rate);
         // A portamento time change re-reads the glide rate of the part's voices (event 0x17,
         o.dsp.set_portamento_rate(tables_, 127 - s.part->ram->portamento_time);
-        o.dsp.render(tables_, controls(s), out, ctx_.interpolation);
-        if (o.dying && !o.dsp.active()) o.busy = o.dying = false;
+        bt.controls[nb] = controls(s);
+        if (!o.dsp.render_begin(tables_, bt.controls[nb], ctx_.interpolation, bt.rows[nb].data(), bt.svf[nb])) {
+            if (o.dying && !o.dsp.active()) o.busy = o.dying = false;
+            continue;
+        }
+        bt.out[nb] = out;
+        bt.obj[nb++] = &o;
+        if (nb == accel::kBatch) flush();
     }
+    flush();
 }
 
 bool ToneModule2006::active() const {

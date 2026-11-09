@@ -11,6 +11,7 @@
 #include <optional>
 #include <vector>
 
+#include "accel/kernels.hpp"
 #include "module.hpp"
 #include "syxg2006le/bank_data.hpp"
 #include "syxg2006le/controllers.hpp"
@@ -171,6 +172,16 @@ private:
     std::vector<Slot> slots_;
     /// DSP object pool and its free-object cursor.
     std::vector<Obj> objs_;
+    /// render's batch (accel::kBatch voices): their blocks between the samples and the outputs, so the
+    /// filter runs across them (accel::svf_le_lanes), with each voice's controls and outputs. Allocated once.
+    struct Batch {
+        std::array<std::array<float, kBlock>, accel::kBatch> rows{};
+        std::array<Obj*, accel::kBatch> obj{};
+        std::array<DspVoice::SvfStep, accel::kBatch> svf{};
+        std::array<VoiceControls, accel::kBatch> controls{};
+        std::array<std::array<float*, DspVoice::kOutputs>, accel::kBatch> out{};
+    };
+    std::unique_ptr<Batch> batch_ = std::make_unique<Batch>();
     std::size_t cursor_ = 0;
     /// FIFO free list of live voices (takes the head; finished voices are
     /// appended at the tail): which DSP voice a note gets sets its LFO phase.
