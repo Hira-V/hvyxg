@@ -2,8 +2,31 @@
 
 Design for hvyxg's accelerated rendering on Hira-V's machines: the X280 (RVV 1.0), the C920
 (RVV 0.7.1, XTheadVector) and the A25 (Andes DSP), in three numeric forms (f32, i32, i16).
-Status: design, nothing built yet. Measured motivation in [PERFORMANCE.md](PERFORMANCE.md) and
-below.
+Measured motivation in [PERFORMANCE.md](PERFORMANCE.md) and below.
+
+## Status
+
+**Built: f32 on RVV** (`src/accel/kernels_rvv.cpp`, the X280 and, from the same source, the C920).
+Both engines batch their voices (up to `kBatch` = 32) through the kernels: resample50, svf50_lanes and
+mix_ramps for the S-YXG50 (and MU mode, which runs the same voice), resample_le (linear, Hermite and
+Lanczos-3), svf_le_lanes and peak_ramp for the S-YXG2006LE. Every kernel is checked against the
+reference by `tools/accel_check.cpp` under qemu at VLEN 128, 256 and 512; the resamplers and filters are
+exact, mix_ramps and peak_ramp within float rounding.
+
+The S-YXG2006LE on the Blackhole (`xgbench voices 32 128`, 48 kHz, 1.64 GHz), a voice's share of a core:
+
+| Interpolation | Scalar resample | RVV |
+|---|---:|---:|
+| linear | -- | 0.162 % |
+| Hermite | -- | 0.172 % |
+| Lanczos-3 | 0.637 % | 0.200 % |
+
+(The Lanczos column's scalar figure is the same build with Lanczos sent to the reference: the same
+digest, 3.2× the time.)
+
+**Not built yet:** XTheadVector run on the Pioneer (it compiles; the C920's 16-bit gathers are filled
+one by one for want of 32-bit indices), the i16 and i32 forms, the A25's DSP kernels, and the 2006LE's
+control code (now most of a voice's time).
 
 ## Where the time goes
 

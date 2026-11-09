@@ -412,17 +412,62 @@ void segment_le(const WalkLE& w, std::int32_t inc, bool hermite, float* out, std
         __riscv_vse32_v_f32m2(out + k, y, vl);
     }
 }
+
+// The S-YXG2006LE's Lanczos run: m samples whose six points (pos - 2 .. pos + 3) all lie inside the
+// direct range. The weight row is lround(frac / 128) (frac ≥ 0: (frac + 64) >> 7), its six weights one
+// segmented gather, the points another; the sum in the reference's order, unfused, so exact. LMUL 1:
+// six fields of 32 bits fit a segment there (EMUL · NFIELDS ≤ 8).
+void segment_lanczos(const WalkLE& w, std::int32_t inc, const float* lanczos, float* out, std::size_t m) {
+    const std::int16_t* base = w.base + w.pos - 2;
+    const auto frac = static_cast<std::uint32_t>(w.frac), uinc = static_cast<std::uint32_t>(inc);
+    for (std::size_t k = 0, vl; k < m; k += vl) {
+        vl = __riscv_vsetvl_e32m1(m - k);
+        const vuint32m1_t acc = __riscv_vadd_vx_u32m1(__riscv_vmul_vx_u32m1(__riscv_vadd_vx_u32m1(__riscv_vid_v_u32m1(vl),
+                                                                            static_cast<std::uint32_t>(k), vl), uinc, vl), frac, vl);
+        const vuint32m1_t off = __riscv_vsll_vx_u32m1(__riscv_vsrl_vx_u32m1(acc, kPhaseBitsLE, vl), 1, vl);   // bytes
+        const vuint32m1_t row = __riscv_vsrl_vx_u32m1(__riscv_vadd_vx_u32m1(__riscv_vand_vx_u32m1(acc, (1u << kPhaseBitsLE) - 1, vl), 64, vl), 7, vl);
+        const vuint32m1_t woff = __riscv_vmul_vx_u32m1(row, 6 * sizeof(float), vl);                          // bytes
+#if defined(__riscv_xtheadvector)
+        alignas(64) std::uint32_t offs[256], wofs[256];
+        alignas(64) float pts[6][256], wts[6][256];
+        __riscv_vse32_v_u32m1(offs, off, vl);
+        __riscv_vse32_v_u32m1(wofs, woff, vl);
+        for (std::size_t j = 0; j < vl; ++j)
+            for (std::size_t p = 0; p < 6; ++p) {
+                pts[p][j] = static_cast<float>(base[offs[j] / 2 + p]);
+                wts[p][j] = lanczos[wofs[j] / sizeof(float) + p];
+            }
+#define HVYXG_PT(p) __riscv_vle32_v_f32m1(pts[p], vl)
+#define HVYXG_WT(p) __riscv_vle32_v_f32m1(wts[p], vl)
+#else
+        const vint16mf2x6_t p6 = __riscv_vluxseg6ei32_v_i16mf2x6(base, off, vl);
+        const vfloat32m1x6_t w6 = __riscv_vluxseg6ei32_v_f32m1x6(lanczos, woff, vl);
+        const auto pt = [&](auto f) { return __riscv_vfwcvt_f_x_v_f32m1(f, vl); };
+#define HVYXG_PT(p) pt(__riscv_vget_v_i16mf2x6_i16mf2(p6, p))
+#define HVYXG_WT(p) __riscv_vget_v_f32m1x6_f32m1(w6, p)
+#endif
+        vfloat32m1_t y = __riscv_vfmul_vv_f32m1(HVYXG_WT(0), HVYXG_PT(0), vl);
+        y = __riscv_vfadd_vv_f32m1(y, __riscv_vfmul_vv_f32m1(HVYXG_WT(1), HVYXG_PT(1), vl), vl);
+        y = __riscv_vfadd_vv_f32m1(y, __riscv_vfmul_vv_f32m1(HVYXG_WT(2), HVYXG_PT(2), vl), vl);
+        y = __riscv_vfadd_vv_f32m1(y, __riscv_vfmul_vv_f32m1(HVYXG_WT(3), HVYXG_PT(3), vl), vl);
+        y = __riscv_vfadd_vv_f32m1(y, __riscv_vfmul_vv_f32m1(HVYXG_WT(4), HVYXG_PT(4), vl), vl);
+        y = __riscv_vfadd_vv_f32m1(y, __riscv_vfmul_vv_f32m1(HVYXG_WT(5), HVYXG_PT(5), vl), vl);
+#undef HVYXG_PT
+#undef HVYXG_WT
+        __riscv_vse32_v_f32m1(out + k, y, vl);
+    }
+}
 } // namespace
 
 void resample_le(WalkLE& w, std::int32_t inc, InterpLE interp, const float* lanczos, float* out, std::size_t n) {
-    // Lanczos (an HQ option: six table weights a sample) stays the reference's for now; a step whose
-    // 128 lanes' fractions could pass 32 bits likewise.
-    if (interp == InterpLE::Lanczos || inc < 0 || inc > (1 << 24)) {
+    // A step whose 128 lanes' fractions could pass 32 bits stays the reference's.
+    if (inc < 0 || inc > (1 << 24)) {
         ref::resample_le(w, inc, interp, lanczos, out, n);
         return;
     }
     const bool hermite = interp == InterpLE::Hermite;
-    const std::int64_t lo = hermite ? 1 : 0, hi = hermite ? 2 : 1;
+    // the points each sample reads, below and above its position
+    const std::int64_t lo = interp == InterpLE::Lanczos ? 2 : hermite ? 1 : 0, hi = interp == InterpLE::Lanczos ? 3 : hermite ? 2 : 1;
     std::size_t k = 0;
     while (k < n) {
         if (w.ended) {
@@ -443,7 +488,8 @@ void resample_le(WalkLE& w, std::int32_t inc, InterpLE interp, const float* lanc
             ++k;
             continue;
         }
-        segment_le(w, inc, hermite, out + k, m);
+        if (interp == InterpLE::Lanczos) segment_lanczos(w, inc, lanczos, out + k, m);
+        else segment_le(w, inc, hermite, out + k, m);
         const std::uint64_t acc = static_cast<std::uint64_t>(w.frac) + static_cast<std::uint64_t>(m) * static_cast<std::uint64_t>(inc);
         w.pos += static_cast<std::int64_t>(acc >> kPhaseBitsLE);
         w.frac = static_cast<std::int32_t>(acc & ((1u << kPhaseBitsLE) - 1));
