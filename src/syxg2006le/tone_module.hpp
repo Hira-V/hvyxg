@@ -180,12 +180,14 @@ private:
         std::array<DspVoice::SvfStep, accel::kBatch> svf{};
         std::array<VoiceControls, accel::kBatch> controls{};
         std::array<std::array<float*, DspVoice::kOutputs>, accel::kBatch> out{};
+        std::size_t n = 0;           // its voices
         accel::LanesLE lanes{};      // the batch's control, where a target has a kernel for it
 #if defined(HVYXG_CHECK_CONTROL)
         std::array<DspVoice, accel::kBatch> check{};   // the voices before the kernel, for the reference
 #endif
     };
-    std::unique_ptr<Batch> batch_ = std::make_unique<Batch>();
+    /// Two: one's control in flight while the other is finished (render).
+    std::array<std::unique_ptr<Batch>, 2> batch_{std::make_unique<Batch>(), std::make_unique<Batch>()};
     std::size_t cursor_ = 0;
     /// FIFO free list of live voices (takes the head; finished voices are
     /// appended at the tail): which DSP voice a note gets sets its LFO phase.

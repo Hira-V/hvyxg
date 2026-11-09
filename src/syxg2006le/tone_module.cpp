@@ -1064,20 +1064,28 @@ void ToneModule2006::render(Buses& buses) {
     // The voices in batches (docs/ACCELERATION.md, "Control across voices"): each voice's begin in
     // order -- the shared random generator's draws in their order, as ever -- then the batch's control
     // (no shared state), each voice's samples, the filter across the batch, then each voice's EQ, fade
-    // and outputs in voice order (render_end).
-    Batch& bt = *batch_;
-    std::size_t nb = 0;
-    const auto flush = [&] {
+    // and outputs in voice order (render_end). Two batches in flight: a full batch's control is issued
+    // (issue: a target's kernel, on its vector unit), then the batch before it finished (finish), so the
+    // scalar work of one overlaps the vector work of the other without reading what is still in flight.
+    // The voices still mix into the buses in voice order.
+    const auto issue = [&](Batch& bt) {
+        if constexpr (accel::kControlLE) {
+            if (!bt.n) return;
+            accel::LanesLE& L = bt.lanes;
+            L.base = reinterpret_cast<std::uint8_t*>(&objs_.front().dsp);
+            for (std::size_t i = 0; i < bt.n; ++i) bt.obj[i]->dsp.to_lanes(L, i, tables_, bt.controls[i]);
+            L.n = bt.n;
+#if defined(HVYXG_CHECK_CONTROL)
+            for (std::size_t i = 0; i < bt.n; ++i) bt.check[i] = bt.obj[i]->dsp;   // before the kernel writes them
+#endif
+            accel::control_le(L, DspVoice::fields_le(), DspVoice::control_tables(tables_));
+        }
+    };
+    const auto finish = [&](Batch& bt) {
+        const std::size_t nb = bt.n;
         if (!nb) return;
         if constexpr (accel::kControlLE) {
             accel::LanesLE& L = bt.lanes;
-            L.base = reinterpret_cast<std::uint8_t*>(&objs_.front().dsp);
-            for (std::size_t i = 0; i < nb; ++i) bt.obj[i]->dsp.to_lanes(L, i, tables_, bt.controls[i]);
-            L.n = nb;
-#if defined(HVYXG_CHECK_CONTROL)
-            for (std::size_t i = 0; i < nb; ++i) bt.check[i] = bt.obj[i]->dsp;   // before the kernel writes them
-#endif
-            accel::control_le(L, DspVoice::fields_le(), DspVoice::control_tables(tables_));
             // the lanes the kernel kept back, and those it does not take: the reference
 #if defined(HVYXG_CHECK_CONTROL)
             {
@@ -1119,7 +1127,15 @@ void ToneModule2006::render(Buses& buses) {
             o.dsp.render_end(bt.out[i], bt.rows[i].data());
             if (o.dying && !o.dsp.active()) o.busy = o.dying = false;
         }
-        nb = 0;
+        bt.n = 0;
+    };
+    Batch* cur = batch_[0].get();
+    Batch* prev = batch_[1].get();
+    cur->n = prev->n = 0;
+    const auto flush = [&] {
+        issue(*cur);
+        finish(*prev);
+        std::swap(cur, prev);
     };
     for (Obj& o : objs_) {
         if (!o.dsp.active()) {
@@ -1144,16 +1160,18 @@ void ToneModule2006::render(Buses& buses) {
         }
         // A portamento time change re-reads the glide rate of the part's voices (event 0x17,
         o.dsp.set_portamento_rate(tables_, 127 - s.part->ram->portamento_time);
-        bt.controls[nb] = controls(s);
+        Batch& bt = *cur;
+        bt.controls[bt.n] = controls(s);
         if (!o.dsp.begin(tables_)) {
             if (o.dying && !o.dsp.active()) o.busy = o.dying = false;
             continue;
         }
-        bt.out[nb] = out;
-        bt.obj[nb++] = &o;
-        if (nb == accel::kBatch) flush();
+        bt.out[bt.n] = out;
+        bt.obj[bt.n++] = &o;
+        if (bt.n == accel::kBatch) flush();
     }
-    flush();
+    flush();                          // the last batch's control, and the one before it
+    finish(*prev);                    // the last
     in_block_ = false;
 }
 

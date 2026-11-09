@@ -156,6 +156,19 @@ filling the lanes and the module's voice loop stay scalar. Next: the batch's who
 samples, filter, mix -- issued without a scalar read of a vector result in between (the scalar side
 working on the next batch's controls meanwhile), and `controls()` in lanes.
 
+**The vector unit's budget a 2006LE voice and 64-sample block** (Hira-V's `xgkbench`, X280, cycles):
+control_le 340; resample linear 425, Hermite 722, Lanczos 1123; peak_ramp 163; svf_le_lanes 176; mix_ramps
+108 (2 buses) to 288 (7). A dependent `vfdiv` is about 127 cycles; a scalar load waits for the vector
+unit only where it reads a word a vector store has not yet written (`vmembench`'s sync rows), so scalar
+and vector work do overlap where the scalar side does not read what is in flight.
+
+**Two batches in flight** (ToneModule2006::render): a full batch's control is issued, then the batch
+before it finished, voice order and the generator's draws unchanged (exact: 16 renders bit for bit,
+0 differences lane by lane, the Blackhole's digests identical). Songs, where the scalar side was the
+limit: `c.mid` 8.08 % → 6.44 % of an X280 core (linear). 128 sustained voices, where the vector unit is
+now the limit: 0.141 % → 0.150 % a voice (0.153 % without the kernel). Next: less vector work (the
+resampler and the peak are the largest), and `controls()` / filling the lanes, still scalar.
+
 **(Superseded) the voices' state in lanes for good.** The per-block state lives in structure-of-arrays form in
 the module (one array per field, indexed by voice object), DspVoice reaching its fields there: the
 kernel then reads and writes unit-stride (16 lanes in a couple of cycles, not 16), over all objects at
