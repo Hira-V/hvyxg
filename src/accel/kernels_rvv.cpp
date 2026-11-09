@@ -134,6 +134,17 @@ inline std::size_t span_of(const Walk50& w, std::int32_t inc_int, std::uint32_t 
 // (x2 - xm1) / 2, c2 = (x1 - x0) - c1 - c3, evaluated with fused multiply-adds -- about 10 operations
 // for the reference's 16, the chain shorter; within float rounding of it (accel_check's bound).
 // HVYXG_ACCEL_EXACT builds the reference's operations in its order instead, bit for bit.
+// The engines' linear interpolation x0 + (x1 - x0) t at LMUL 4, the accelerated form: one fused
+// multiply-add after the difference (within float rounding of the reference's multiply then add;
+// HVYXG_ACCEL_EXACT builds the reference's operations, bit for bit).
+inline vfloat32m4_t lerp_m4(vfloat32m4_t x0, vfloat32m4_t x1, vfloat32m4_t t, std::size_t vl) {
+#if defined(HVYXG_ACCEL_EXACT)
+    return __riscv_vfadd_vv_f32m4(x0, __riscv_vfmul_vv_f32m4(__riscv_vfsub_vv_f32m4(x1, x0, vl), t, vl), vl);
+#else
+    return __riscv_vfmacc_vv_f32m4(x0, __riscv_vfsub_vv_f32m4(x1, x0, vl), t, vl);   // x0 + d t
+#endif
+}
+
 inline vfloat32m4_t hermite_m4(vfloat32m4_t xm1, vfloat32m4_t x0, vfloat32m4_t x1, vfloat32m4_t x2, vfloat32m4_t t, std::size_t vl) {
 #if defined(HVYXG_ACCEL_EXACT)
     const vfloat32m4_t c1 = __riscv_vfmul_vf_f32m4(__riscv_vfsub_vv_f32m4(x1, xm1, vl), 0.5f, vl);
@@ -199,7 +210,7 @@ __attribute__((noinline)) void segment8_linear(const Walk50& w, std::int32_t inc
             return __riscv_vfwcvt_f_x_v_f32m4(__riscv_vwadd_vx_i16m2(b, 0, vl), vl);
         };
         const vfloat32m4_t x0 = to_f(b0), x1 = to_f(b1);
-        const vfloat32m4_t y = __riscv_vfadd_vv_f32m4(x0, __riscv_vfmul_vv_f32m4(__riscv_vfsub_vv_f32m4(x1, x0, vl), t, vl), vl);
+        const vfloat32m4_t y = lerp_m4(x0, x1, t, vl);
         __riscv_vse32_v_f32m4(out + k, __riscv_vfmul_vf_f32m4(y, 1.0f / 128.0f, vl), vl);
     }
 }
@@ -275,7 +286,7 @@ __attribute__((noinline)) void segment8_hermite(const Walk50& w, std::int32_t in
                 const vuint16m2x2_t p = __riscv_vluxseg2ei32_v_u16m2x2(reinterpret_cast<const std::uint16_t*>(base), i0, vl);
                 x0 = f16(__riscv_vget_v_u16m2x2_u16m2(p, 0)), x1 = f16(__riscv_vget_v_u16m2x2_u16m2(p, 1));
             }
-            y = __riscv_vfadd_vv_f32m4(x0, __riscv_vfmul_vv_f32m4(__riscv_vfsub_vv_f32m4(x1, x0, vl), t, vl), vl);
+            y = lerp_m4(x0, x1, t, vl);
         }
         __riscv_vse32_v_f32m4(out + k, __riscv_vfmul_vf_f32m4(y, scale, vl), vl);
     }
@@ -325,7 +336,7 @@ __attribute__((noinline)) void segment16_linear(const Walk50& w, std::int32_t in
                                                                                   static_cast<std::uint32_t>(p0 + w.pre), vl), 0, vl);
             const vuint32m4_t g = __riscv_vlmul_trunc_v_u32m8_u32m4(__riscv_vrgatherei16_vv_u32m8(pairs, __riscv_vlmul_ext_v_u16m2_u16m4(rel), vl));
             const vfloat32m4_t x0 = f16(__riscv_vnsrl_wx_u16m2(g, 0, vl)), x1 = f16(__riscv_vnsrl_wx_u16m2(g, 16, vl));
-            y = __riscv_vfadd_vv_f32m4(x0, __riscv_vfmul_vv_f32m4(__riscv_vfsub_vv_f32m4(x1, x0, vl), t, vl), vl);
+            y = lerp_m4(x0, x1, t, vl);
             __riscv_vse32_v_f32m4(out + k, __riscv_vfmul_vf_f32m4(y, scale, vl), vl);
             continue;
         }
@@ -360,7 +371,7 @@ __attribute__((noinline)) void segment16_linear(const Walk50& w, std::int32_t in
                 const vuint16m2x2_t p = __riscv_vluxseg2ei32_v_u16m2x2(reinterpret_cast<const std::uint16_t*>(base), i0, vl);
                 x0 = f16(__riscv_vget_v_u16m2x2_u16m2(p, 0)), x1 = f16(__riscv_vget_v_u16m2x2_u16m2(p, 1));
             }
-            y = __riscv_vfadd_vv_f32m4(x0, __riscv_vfmul_vv_f32m4(__riscv_vfsub_vv_f32m4(x1, x0, vl), t, vl), vl);
+            y = lerp_m4(x0, x1, t, vl);
         }
         __riscv_vse32_v_f32m4(out + k, __riscv_vfmul_vf_f32m4(y, scale, vl), vl);
     }
@@ -410,7 +421,7 @@ __attribute__((noinline)) void segment16_hermite(const Walk50& w, std::int32_t i
                                                                                   static_cast<std::uint32_t>(p0 + w.pre), vl), 0, vl);
             const vuint32m4_t g = __riscv_vlmul_trunc_v_u32m8_u32m4(__riscv_vrgatherei16_vv_u32m8(pairs, __riscv_vlmul_ext_v_u16m2_u16m4(rel), vl));
             const vfloat32m4_t x0 = f16(__riscv_vnsrl_wx_u16m2(g, 0, vl)), x1 = f16(__riscv_vnsrl_wx_u16m2(g, 16, vl));
-            y = __riscv_vfadd_vv_f32m4(x0, __riscv_vfmul_vv_f32m4(__riscv_vfsub_vv_f32m4(x1, x0, vl), t, vl), vl);
+            y = lerp_m4(x0, x1, t, vl);
             __riscv_vse32_v_f32m4(out + k, __riscv_vfmul_vf_f32m4(y, scale, vl), vl);
             continue;
         }
@@ -437,7 +448,7 @@ __attribute__((noinline)) void segment16_hermite(const Walk50& w, std::int32_t i
                 const vuint16m2x2_t p = __riscv_vluxseg2ei32_v_u16m2x2(reinterpret_cast<const std::uint16_t*>(base), i0, vl);
                 x0 = f16(__riscv_vget_v_u16m2x2_u16m2(p, 0)), x1 = f16(__riscv_vget_v_u16m2x2_u16m2(p, 1));
             }
-            y = __riscv_vfadd_vv_f32m4(x0, __riscv_vfmul_vv_f32m4(__riscv_vfsub_vv_f32m4(x1, x0, vl), t, vl), vl);
+            y = lerp_m4(x0, x1, t, vl);
         }
         __riscv_vse32_v_f32m4(out + k, __riscv_vfmul_vf_f32m4(y, scale, vl), vl);
     }
@@ -725,7 +736,7 @@ __attribute__((noinline)) void segment_le_m4(const WalkLE& w, std::int32_t inc, 
             // w1 = 32 (frac >> 5) / 32768; v = s0 + (s1 - s0) w1
             const vfloat32m4_t w1 = __riscv_vfmul_vf_f32m4(__riscv_vfcvt_f_xu_v_f32m4(__riscv_vsll_vx_u32m4(__riscv_vsrl_vx_u32m4(fr, 5, vl), 5, vl), vl),
                                                            1.0f / 32768.0f, vl);
-            y = __riscv_vfadd_vv_f32m4(s0, __riscv_vfmul_vv_f32m4(__riscv_vfsub_vv_f32m4(s1, s0, vl), w1, vl), vl);
+            y = lerp_m4(s0, s1, w1, vl);
         }
         __riscv_vse32_v_f32m4(out + k, y, vl);
     }
@@ -784,7 +795,54 @@ void segment_le(const WalkLE& w, std::int32_t inc, bool hermite, float* out, std
 // direct range. The weight row is lround(frac / 128) (frac ≥ 0: (frac + 64) >> 7), its six weights one
 // segmented gather, the points another; the sum in the reference's order, unfused, so exact. LMUL 1:
 // six fields of 32 bits fit a segment there (EMUL · NFIELDS ≤ 8).
+#if !defined(__riscv_xtheadvector)
+// The Lanczos run at LMUL 2 (twice the lanes a chain of the LMUL 1 one below): the six points one
+// segmented gather of 16-bit samples, the six weights two of three 32-bit words each (a segment of
+// six would need 12 registers at LMUL 2). The sum: the accelerated form, fused multiply-adds in the
+// reference's order (within float rounding of it); HVYXG_ACCEL_EXACT: its multiplies and adds.
+__attribute__((noinline)) void segment_lanczos_m2(const WalkLE& w, std::int32_t inc, const float* lanczos, float* out, std::size_t m) {
+    const std::int16_t* base = w.base + w.pos - 2;
+    const auto frac = static_cast<std::uint32_t>(w.frac), uinc = static_cast<std::uint32_t>(inc);
+    for (std::size_t k = 0, vl; k < m; k += vl) {
+        vl = __riscv_vsetvl_e32m2(m - k);
+        const vuint32m2_t acc = __riscv_vadd_vx_u32m2(__riscv_vmul_vx_u32m2(__riscv_vadd_vx_u32m2(__riscv_vid_v_u32m2(vl),
+                                                                            static_cast<std::uint32_t>(k), vl), uinc, vl), frac, vl);
+        const vuint32m2_t off = __riscv_vsll_vx_u32m2(__riscv_vsrl_vx_u32m2(acc, kPhaseBitsLE, vl), 1, vl);   // bytes
+        const vuint32m2_t row = __riscv_vsrl_vx_u32m2(__riscv_vadd_vx_u32m2(__riscv_vand_vx_u32m2(acc, (1u << kPhaseBitsLE) - 1, vl), 64, vl), 7, vl);
+        const vuint32m2_t woff = __riscv_vmul_vx_u32m2(row, 6 * sizeof(float), vl);                          // bytes
+        const vint16m1x6_t p6 = __riscv_vluxseg6ei32_v_i16m1x6(base, off, vl);
+        const vfloat32m2x3_t wa = __riscv_vluxseg3ei32_v_f32m2x3(lanczos, woff, vl);
+        const vfloat32m2x3_t wb = __riscv_vluxseg3ei32_v_f32m2x3(lanczos + 3, woff, vl);
+        const auto pt = [&](vint16m1_t v) { return __riscv_vfwcvt_f_x_v_f32m2(v, vl); };
+        const vfloat32m2_t p0 = pt(__riscv_vget_v_i16m1x6_i16m1(p6, 0)), p1 = pt(__riscv_vget_v_i16m1x6_i16m1(p6, 1));
+        const vfloat32m2_t p2 = pt(__riscv_vget_v_i16m1x6_i16m1(p6, 2)), p3 = pt(__riscv_vget_v_i16m1x6_i16m1(p6, 3));
+        const vfloat32m2_t p4 = pt(__riscv_vget_v_i16m1x6_i16m1(p6, 4)), p5 = pt(__riscv_vget_v_i16m1x6_i16m1(p6, 5));
+        const vfloat32m2_t w0 = __riscv_vget_v_f32m2x3_f32m2(wa, 0), w1 = __riscv_vget_v_f32m2x3_f32m2(wa, 1), w2 = __riscv_vget_v_f32m2x3_f32m2(wa, 2);
+        const vfloat32m2_t w3 = __riscv_vget_v_f32m2x3_f32m2(wb, 0), w4 = __riscv_vget_v_f32m2x3_f32m2(wb, 1), w5 = __riscv_vget_v_f32m2x3_f32m2(wb, 2);
+        vfloat32m2_t y = __riscv_vfmul_vv_f32m2(w0, p0, vl);
+#if defined(HVYXG_ACCEL_EXACT)
+        y = __riscv_vfadd_vv_f32m2(y, __riscv_vfmul_vv_f32m2(w1, p1, vl), vl);
+        y = __riscv_vfadd_vv_f32m2(y, __riscv_vfmul_vv_f32m2(w2, p2, vl), vl);
+        y = __riscv_vfadd_vv_f32m2(y, __riscv_vfmul_vv_f32m2(w3, p3, vl), vl);
+        y = __riscv_vfadd_vv_f32m2(y, __riscv_vfmul_vv_f32m2(w4, p4, vl), vl);
+        y = __riscv_vfadd_vv_f32m2(y, __riscv_vfmul_vv_f32m2(w5, p5, vl), vl);
+#else
+        y = __riscv_vfmacc_vv_f32m2(y, w1, p1, vl);
+        y = __riscv_vfmacc_vv_f32m2(y, w2, p2, vl);
+        y = __riscv_vfmacc_vv_f32m2(y, w3, p3, vl);
+        y = __riscv_vfmacc_vv_f32m2(y, w4, p4, vl);
+        y = __riscv_vfmacc_vv_f32m2(y, w5, p5, vl);
+#endif
+        __riscv_vse32_v_f32m2(out + k, y, vl);
+    }
+}
+#endif
+
 void segment_lanczos(const WalkLE& w, std::int32_t inc, const float* lanczos, float* out, std::size_t m) {
+#if !defined(__riscv_xtheadvector)
+    segment_lanczos_m2(w, inc, lanczos, out, m);
+    return;
+#endif
     const std::int16_t* base = w.base + w.pos - 2;
     const auto frac = static_cast<std::uint32_t>(w.frac), uinc = static_cast<std::uint32_t>(inc);
     for (std::size_t k = 0, vl; k < m; k += vl) {

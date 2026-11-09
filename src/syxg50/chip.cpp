@@ -513,8 +513,10 @@ void ChipVoice::render_end(Buses& buses, float* x) {
         g[k] = g0;
         dg[k++] = (g1 - g0) * (1.0f / 128.0f);
     }
+    // read before the mix is issued (a scalar load after vector stores may wait for them: dsp_voice.cpp)
+    const bool end = done_ || ended_ || faded;
     accel::mix_ramps(x, dst.data(), g.data(), dg.data(), k, kBlock);
-    if (done_ || ended_ || faded) active_ = false;
+    if (end) active_ = false;
 }
 
 void ChipVoice::render(Buses& buses, const RateTables& rt, Interpolation interp) {

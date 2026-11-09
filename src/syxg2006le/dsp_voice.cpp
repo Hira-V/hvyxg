@@ -1044,9 +1044,13 @@ void DspVoice::render_end(std::array<float*, kOutputs> out, float* x) {
             gd[k++] = (target - a) / kBlock;
         }
     }
+    // The voice's end, read before the mix is issued: a scalar load just after vector stores waits
+    // for them where the X280 cannot tell their addresses apart (it can depend on where the heap put
+    // things -- a 2006LE voice cost 0.146% -> 0.18% of a core from a layout change alone).
+    const bool end = eg_.finished || sample_ended_ || faded;
     accel::mix_ramps(x, bus.data(), ga.data(), gd.data(), k, kBlock);
 
-    if (eg_.finished || sample_ended_ || faded) {
+    if (end) {
         state_ = State::Idle;
         ended_released_ = released_;
         ended_ = true;

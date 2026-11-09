@@ -6,7 +6,7 @@
 //
 //   accel_check [ROUNDS]
 //
-// resample50 and resample_le (their Hermite within 2e-6 of full scale; exact with HVYXG_ACCEL_EXACT), svf50_lanes and svf_le_lanes must be exact; peak_ramp within 1e-5; mix_ramps within 1e-5 of full scale (-100 dBFS): its ramps are closed form
+// resample50 and resample_le (their fused forms within 2e-6 of full scale; exact with HVYXG_ACCEL_EXACT), svf50_lanes and svf_le_lanes must be exact; peak_ramp within 1e-5; mix_ramps within 1e-5 of full scale (-100 dBFS): its ramps are closed form
 // (g0 + i·dg), the reference's 128 additions of dg in a row, each rounded -- up to ~128 roundings apart.
 
 #include "accel/kernels.hpp"
@@ -33,10 +33,11 @@ std::uint32_t rnd(std::uint32_t n) { return n ? rnd() % n : 0; }
 
 int g_failed = 0;
 
-/// The S-YXG50's accelerated Hermite (kernels_rvv.cpp hermite_m4): its error bound, and the largest seen.
-constexpr double kHermite50 = 2e-6;
-double g_hermite50_worst = 0;
-double g_hermite_le_worst = 0;              // the 2006LE's (the same form)
+/// The resamplers' accelerated forms (kernels_rvv.cpp: lerp_m4, hermite_m4, the Lanczos sum's fused
+/// multiply-adds): their error bound, and the largest seen, of full scale.
+constexpr double kFused = 2e-6;
+double g_fused50_worst = 0;
+double g_fused_le_worst = 0;
 
 void check_resample(int rounds) {
     std::vector<std::uint8_t> wave;
@@ -76,16 +77,16 @@ void check_resample(int rounds) {
 #endif
             ++blocks;
             samples += static_cast<long>(n);
-            // Hermite in the accelerated build: the fused form, within kHermite50 of full scale (exact with
-            // HVYXG_ACCEL_EXACT); linear, and the walk, always exact.
+            // The accelerated build's fused forms (linear, Hermite): within kFused of full scale (exact with
+            // HVYXG_ACCEL_EXACT); the walk always exact.
             bool same = std::memcmp(ya, yb, n * sizeof(float)) == 0;
 #if defined(HVYXG_ACCEL_RVV) && !defined(HVYXG_ACCEL_EXACT)
-            if (!same && hermite) {
+            if (!same) {
                 same = true;
                 for (std::size_t i = 0; i < n; ++i) {
                     const double e = std::fabs(static_cast<double>(ya[i]) - static_cast<double>(yb[i]));
-                    g_hermite50_worst = e > g_hermite50_worst ? e : g_hermite50_worst;
-                    if (e > kHermite50) same = false;
+                    g_fused50_worst = e > g_fused50_worst ? e : g_fused50_worst;
+                    if (e > kFused) same = false;
                 }
             }
 #endif
@@ -102,7 +103,7 @@ void check_resample(int rounds) {
             }
         }
     }
-    std::printf("resample50: %ld blocks, %ld samples; Hermite's largest error %.3g of full scale\n", blocks, samples, g_hermite50_worst);
+    std::printf("resample50: %ld blocks, %ld samples; largest error %.3g of full scale\n", blocks, samples, g_fused50_worst);
 }
 
 void check_mix(int rounds) {
@@ -201,16 +202,16 @@ void check_resample_le(int rounds) {
             ref::resample_le(a, inc, interp, lanczos, ya, n);
             TARGET(resample_le)(b, inc, interp, lanczos, yb, n);
             samples += static_cast<long>(n);
-            // Hermite in the accelerated build: the fused form, within kHermite50 of full scale (32768 here);
-            // linear, Lanczos and the walk exact.
+            // The accelerated build's fused forms (linear, Hermite, Lanczos): within kFused of full scale
+            // (32768 here); the walk exact.
             bool same = std::memcmp(ya, yb, n * 4) == 0;
 #if defined(HVYXG_ACCEL_RVV) && !defined(HVYXG_ACCEL_EXACT)
-            if (!same && interp == InterpLE::Hermite) {
+            if (!same) {
                 same = true;
                 for (std::size_t i = 0; i < n; ++i) {
                     const double e = std::fabs(static_cast<double>(ya[i]) - static_cast<double>(yb[i])) / 32768.0;
-                    g_hermite_le_worst = e > g_hermite_le_worst ? e : g_hermite_le_worst;
-                    if (e > kHermite50) same = false;
+                    g_fused_le_worst = e > g_fused_le_worst ? e : g_fused_le_worst;
+                    if (e > kFused) same = false;
                 }
             }
 #endif
@@ -222,7 +223,7 @@ void check_resample_le(int rounds) {
             }
         }
     }
-    std::printf("resample_le: %ld samples; Hermite's largest error %.3g of full scale\n", samples, g_hermite_le_worst);
+    std::printf("resample_le: %ld samples; largest error %.3g of full scale\n", samples, g_fused_le_worst);
 }
 
 void check_svf_le_lanes(int rounds) {
