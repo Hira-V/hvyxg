@@ -94,37 +94,211 @@ inline vf eg_gain(vi x, std::size_t vl) {
     return self(__riscv_vmslt_vx_i32m1_b32(x, 0, vl), splatf(1.0f, vl), g, vl);
 }
 
-/// Lane access to the voices: a field at its offset in each lane's voice (base + at).
+/// Lane access to the voices: runs of consecutive 32-bit words at an offset in each lane's voice
+/// (base + at), as one indexed segment load or store (RVV 1.0), or a word at a time (XTheadVector).
 inline vu idx(vu at, std::uint32_t off, std::size_t vl) { return __riscv_vadd_vx_u32m1(at, off, vl); }
 inline vi vgi(const std::uint8_t* base, vu at, std::uint32_t off, std::size_t vl) {
     return __riscv_vluxei32_v_i32m1(reinterpret_cast<const std::int32_t*>(base), idx(at, off, vl), vl);
 }
-inline vf vgf(const std::uint8_t* base, vu at, std::uint32_t off, std::size_t vl) {
-    return __riscv_vluxei32_v_f32m1(reinterpret_cast<const float*>(base), idx(at, off, vl), vl);
-}
-inline void vput(std::uint8_t* base, vu at, vb keep, std::uint32_t off, vi v, std::size_t vl) {
-    __riscv_vsuxei32_v_i32m1_m(keep, reinterpret_cast<std::int32_t*>(base), idx(at, off, vl), v, vl);
-}
-inline void vput(std::uint8_t* base, vu at, vb keep, std::uint32_t off, vf v, std::size_t vl) {
-    __riscv_vsuxei32_v_f32m1_m(keep, reinterpret_cast<float*>(base), idx(at, off, vl), v, vl);
+inline vf asf(vi v) { return __riscv_vreinterpret_v_i32m1_f32m1(v); }
+inline vi asi(vf v) { return __riscv_vreinterpret_v_f32m1_i32m1(v); }
+
+inline void load_run(const std::uint8_t* base, vu at, std::uint32_t off, std::size_t vl, vi& r0, vi& r1) {
+#if defined(__riscv_xtheadvector)
+    r0 = vgi(base, at, off + 0, vl);
+    r1 = vgi(base, at, off + 4, vl);
+#else
+    const vint32m1x2_t t = __riscv_vluxseg2ei32_v_i32m1x2(reinterpret_cast<const std::int32_t*>(base), idx(at, off, vl), vl);
+    r0 = __riscv_vget_v_i32m1x2_i32m1(t, 0);
+    r1 = __riscv_vget_v_i32m1x2_i32m1(t, 1);
+#endif
 }
 
-/// One mod EG (mod_tick and mod_advance): its new state, position and delay counter.
-inline void mod_eg(const std::uint8_t* base, vu at, const FieldsLE::Eg& e, vb gated, vi& state, vi& pos, vi& delay, std::size_t vl) {
-    const auto Vi = [&](std::uint32_t off) { return vgi(base, at, off, vl); };
-    const vi stt = Vi(e.state);
-    pos = Vi(e.pos);
-    delay = Vi(e.delay);
-    const vi l1 = Vi(e.level1), l2 = Vi(e.level2), l3 = Vi(e.level3);
+inline void load_run(const std::uint8_t* base, vu at, std::uint32_t off, std::size_t vl, vi& r0, vi& r1, vi& r2) {
+#if defined(__riscv_xtheadvector)
+    r0 = vgi(base, at, off + 0, vl);
+    r1 = vgi(base, at, off + 4, vl);
+    r2 = vgi(base, at, off + 8, vl);
+#else
+    const vint32m1x3_t t = __riscv_vluxseg3ei32_v_i32m1x3(reinterpret_cast<const std::int32_t*>(base), idx(at, off, vl), vl);
+    r0 = __riscv_vget_v_i32m1x3_i32m1(t, 0);
+    r1 = __riscv_vget_v_i32m1x3_i32m1(t, 1);
+    r2 = __riscv_vget_v_i32m1x3_i32m1(t, 2);
+#endif
+}
+
+inline void load_run(const std::uint8_t* base, vu at, std::uint32_t off, std::size_t vl, vi& r0, vi& r1, vi& r2, vi& r3, vi& r4) {
+#if defined(__riscv_xtheadvector)
+    r0 = vgi(base, at, off + 0, vl);
+    r1 = vgi(base, at, off + 4, vl);
+    r2 = vgi(base, at, off + 8, vl);
+    r3 = vgi(base, at, off + 12, vl);
+    r4 = vgi(base, at, off + 16, vl);
+#else
+    const vint32m1x5_t t = __riscv_vluxseg5ei32_v_i32m1x5(reinterpret_cast<const std::int32_t*>(base), idx(at, off, vl), vl);
+    r0 = __riscv_vget_v_i32m1x5_i32m1(t, 0);
+    r1 = __riscv_vget_v_i32m1x5_i32m1(t, 1);
+    r2 = __riscv_vget_v_i32m1x5_i32m1(t, 2);
+    r3 = __riscv_vget_v_i32m1x5_i32m1(t, 3);
+    r4 = __riscv_vget_v_i32m1x5_i32m1(t, 4);
+#endif
+}
+
+inline void load_run(const std::uint8_t* base, vu at, std::uint32_t off, std::size_t vl, vi& r0, vi& r1, vi& r2, vi& r3, vi& r4, vi& r5) {
+#if defined(__riscv_xtheadvector)
+    r0 = vgi(base, at, off + 0, vl);
+    r1 = vgi(base, at, off + 4, vl);
+    r2 = vgi(base, at, off + 8, vl);
+    r3 = vgi(base, at, off + 12, vl);
+    r4 = vgi(base, at, off + 16, vl);
+    r5 = vgi(base, at, off + 20, vl);
+#else
+    const vint32m1x6_t t = __riscv_vluxseg6ei32_v_i32m1x6(reinterpret_cast<const std::int32_t*>(base), idx(at, off, vl), vl);
+    r0 = __riscv_vget_v_i32m1x6_i32m1(t, 0);
+    r1 = __riscv_vget_v_i32m1x6_i32m1(t, 1);
+    r2 = __riscv_vget_v_i32m1x6_i32m1(t, 2);
+    r3 = __riscv_vget_v_i32m1x6_i32m1(t, 3);
+    r4 = __riscv_vget_v_i32m1x6_i32m1(t, 4);
+    r5 = __riscv_vget_v_i32m1x6_i32m1(t, 5);
+#endif
+}
+
+inline void load_run(const std::uint8_t* base, vu at, std::uint32_t off, std::size_t vl, vi& r0, vi& r1, vi& r2, vi& r3, vi& r4, vi& r5, vi& r6) {
+#if defined(__riscv_xtheadvector)
+    r0 = vgi(base, at, off + 0, vl);
+    r1 = vgi(base, at, off + 4, vl);
+    r2 = vgi(base, at, off + 8, vl);
+    r3 = vgi(base, at, off + 12, vl);
+    r4 = vgi(base, at, off + 16, vl);
+    r5 = vgi(base, at, off + 20, vl);
+    r6 = vgi(base, at, off + 24, vl);
+#else
+    const vint32m1x7_t t = __riscv_vluxseg7ei32_v_i32m1x7(reinterpret_cast<const std::int32_t*>(base), idx(at, off, vl), vl);
+    r0 = __riscv_vget_v_i32m1x7_i32m1(t, 0);
+    r1 = __riscv_vget_v_i32m1x7_i32m1(t, 1);
+    r2 = __riscv_vget_v_i32m1x7_i32m1(t, 2);
+    r3 = __riscv_vget_v_i32m1x7_i32m1(t, 3);
+    r4 = __riscv_vget_v_i32m1x7_i32m1(t, 4);
+    r5 = __riscv_vget_v_i32m1x7_i32m1(t, 5);
+    r6 = __riscv_vget_v_i32m1x7_i32m1(t, 6);
+#endif
+}
+
+inline void load_run(const std::uint8_t* base, vu at, std::uint32_t off, std::size_t vl, vi& r0, vi& r1, vi& r2, vi& r3, vi& r4, vi& r5, vi& r6, vi& r7) {
+#if defined(__riscv_xtheadvector)
+    r0 = vgi(base, at, off + 0, vl);
+    r1 = vgi(base, at, off + 4, vl);
+    r2 = vgi(base, at, off + 8, vl);
+    r3 = vgi(base, at, off + 12, vl);
+    r4 = vgi(base, at, off + 16, vl);
+    r5 = vgi(base, at, off + 20, vl);
+    r6 = vgi(base, at, off + 24, vl);
+    r7 = vgi(base, at, off + 28, vl);
+#else
+    const vint32m1x8_t t = __riscv_vluxseg8ei32_v_i32m1x8(reinterpret_cast<const std::int32_t*>(base), idx(at, off, vl), vl);
+    r0 = __riscv_vget_v_i32m1x8_i32m1(t, 0);
+    r1 = __riscv_vget_v_i32m1x8_i32m1(t, 1);
+    r2 = __riscv_vget_v_i32m1x8_i32m1(t, 2);
+    r3 = __riscv_vget_v_i32m1x8_i32m1(t, 3);
+    r4 = __riscv_vget_v_i32m1x8_i32m1(t, 4);
+    r5 = __riscv_vget_v_i32m1x8_i32m1(t, 5);
+    r6 = __riscv_vget_v_i32m1x8_i32m1(t, 6);
+    r7 = __riscv_vget_v_i32m1x8_i32m1(t, 7);
+#endif
+}
+
+inline void store_run(std::uint8_t* base, vu at, vb keep, std::uint32_t off, std::size_t vl, vi v0, vi v1) {
+#if defined(__riscv_xtheadvector)
+    __riscv_vsuxei32_v_i32m1_m(keep, reinterpret_cast<std::int32_t*>(base), idx(at, off + 0, vl), v0, vl);
+    __riscv_vsuxei32_v_i32m1_m(keep, reinterpret_cast<std::int32_t*>(base), idx(at, off + 4, vl), v1, vl);
+#else
+    vint32m1x2_t t = __riscv_vundefined_i32m1x2();
+    t = __riscv_vset_v_i32m1_i32m1x2(t, 0, v0);
+    t = __riscv_vset_v_i32m1_i32m1x2(t, 1, v1);
+    __riscv_vsuxseg2ei32_v_i32m1x2_m(keep, reinterpret_cast<std::int32_t*>(base), idx(at, off, vl), t, vl);
+#endif
+}
+
+inline void store_run(std::uint8_t* base, vu at, vb keep, std::uint32_t off, std::size_t vl, vi v0, vi v1, vi v2, vi v3, vi v4) {
+#if defined(__riscv_xtheadvector)
+    __riscv_vsuxei32_v_i32m1_m(keep, reinterpret_cast<std::int32_t*>(base), idx(at, off + 0, vl), v0, vl);
+    __riscv_vsuxei32_v_i32m1_m(keep, reinterpret_cast<std::int32_t*>(base), idx(at, off + 4, vl), v1, vl);
+    __riscv_vsuxei32_v_i32m1_m(keep, reinterpret_cast<std::int32_t*>(base), idx(at, off + 8, vl), v2, vl);
+    __riscv_vsuxei32_v_i32m1_m(keep, reinterpret_cast<std::int32_t*>(base), idx(at, off + 12, vl), v3, vl);
+    __riscv_vsuxei32_v_i32m1_m(keep, reinterpret_cast<std::int32_t*>(base), idx(at, off + 16, vl), v4, vl);
+#else
+    vint32m1x5_t t = __riscv_vundefined_i32m1x5();
+    t = __riscv_vset_v_i32m1_i32m1x5(t, 0, v0);
+    t = __riscv_vset_v_i32m1_i32m1x5(t, 1, v1);
+    t = __riscv_vset_v_i32m1_i32m1x5(t, 2, v2);
+    t = __riscv_vset_v_i32m1_i32m1x5(t, 3, v3);
+    t = __riscv_vset_v_i32m1_i32m1x5(t, 4, v4);
+    __riscv_vsuxseg5ei32_v_i32m1x5_m(keep, reinterpret_cast<std::int32_t*>(base), idx(at, off, vl), t, vl);
+#endif
+}
+
+inline void store_run(std::uint8_t* base, vu at, vb keep, std::uint32_t off, std::size_t vl, vi v0, vi v1, vi v2, vi v3, vi v4, vi v5, vi v6) {
+#if defined(__riscv_xtheadvector)
+    __riscv_vsuxei32_v_i32m1_m(keep, reinterpret_cast<std::int32_t*>(base), idx(at, off + 0, vl), v0, vl);
+    __riscv_vsuxei32_v_i32m1_m(keep, reinterpret_cast<std::int32_t*>(base), idx(at, off + 4, vl), v1, vl);
+    __riscv_vsuxei32_v_i32m1_m(keep, reinterpret_cast<std::int32_t*>(base), idx(at, off + 8, vl), v2, vl);
+    __riscv_vsuxei32_v_i32m1_m(keep, reinterpret_cast<std::int32_t*>(base), idx(at, off + 12, vl), v3, vl);
+    __riscv_vsuxei32_v_i32m1_m(keep, reinterpret_cast<std::int32_t*>(base), idx(at, off + 16, vl), v4, vl);
+    __riscv_vsuxei32_v_i32m1_m(keep, reinterpret_cast<std::int32_t*>(base), idx(at, off + 20, vl), v5, vl);
+    __riscv_vsuxei32_v_i32m1_m(keep, reinterpret_cast<std::int32_t*>(base), idx(at, off + 24, vl), v6, vl);
+#else
+    vint32m1x7_t t = __riscv_vundefined_i32m1x7();
+    t = __riscv_vset_v_i32m1_i32m1x7(t, 0, v0);
+    t = __riscv_vset_v_i32m1_i32m1x7(t, 1, v1);
+    t = __riscv_vset_v_i32m1_i32m1x7(t, 2, v2);
+    t = __riscv_vset_v_i32m1_i32m1x7(t, 3, v3);
+    t = __riscv_vset_v_i32m1_i32m1x7(t, 4, v4);
+    t = __riscv_vset_v_i32m1_i32m1x7(t, 5, v5);
+    t = __riscv_vset_v_i32m1_i32m1x7(t, 6, v6);
+    __riscv_vsuxseg7ei32_v_i32m1x7_m(keep, reinterpret_cast<std::int32_t*>(base), idx(at, off, vl), t, vl);
+#endif
+}
+
+inline void store_run(std::uint8_t* base, vu at, vb keep, std::uint32_t off, std::size_t vl, vi v0, vi v1, vi v2, vi v3, vi v4, vi v5, vi v6, vi v7) {
+#if defined(__riscv_xtheadvector)
+    __riscv_vsuxei32_v_i32m1_m(keep, reinterpret_cast<std::int32_t*>(base), idx(at, off + 0, vl), v0, vl);
+    __riscv_vsuxei32_v_i32m1_m(keep, reinterpret_cast<std::int32_t*>(base), idx(at, off + 4, vl), v1, vl);
+    __riscv_vsuxei32_v_i32m1_m(keep, reinterpret_cast<std::int32_t*>(base), idx(at, off + 8, vl), v2, vl);
+    __riscv_vsuxei32_v_i32m1_m(keep, reinterpret_cast<std::int32_t*>(base), idx(at, off + 12, vl), v3, vl);
+    __riscv_vsuxei32_v_i32m1_m(keep, reinterpret_cast<std::int32_t*>(base), idx(at, off + 16, vl), v4, vl);
+    __riscv_vsuxei32_v_i32m1_m(keep, reinterpret_cast<std::int32_t*>(base), idx(at, off + 20, vl), v5, vl);
+    __riscv_vsuxei32_v_i32m1_m(keep, reinterpret_cast<std::int32_t*>(base), idx(at, off + 24, vl), v6, vl);
+    __riscv_vsuxei32_v_i32m1_m(keep, reinterpret_cast<std::int32_t*>(base), idx(at, off + 28, vl), v7, vl);
+#else
+    vint32m1x8_t t = __riscv_vundefined_i32m1x8();
+    t = __riscv_vset_v_i32m1_i32m1x8(t, 0, v0);
+    t = __riscv_vset_v_i32m1_i32m1x8(t, 1, v1);
+    t = __riscv_vset_v_i32m1_i32m1x8(t, 2, v2);
+    t = __riscv_vset_v_i32m1_i32m1x8(t, 3, v3);
+    t = __riscv_vset_v_i32m1_i32m1x8(t, 4, v4);
+    t = __riscv_vset_v_i32m1_i32m1x8(t, 5, v5);
+    t = __riscv_vset_v_i32m1_i32m1x8(t, 6, v6);
+    t = __riscv_vset_v_i32m1_i32m1x8(t, 7, v7);
+    __riscv_vsuxseg8ei32_v_i32m1x8_m(keep, reinterpret_cast<std::int32_t*>(base), idx(at, off, vl), t, vl);
+#endif
+}
+
+/// One mod EG (mod_tick and mod_advance), from its two runs; its new state, position and delay counter
+/// replace theirs in run a (the rest of it stays: stored back as it is).
+inline void mod_eg(const std::uint8_t* base, vu at, const FieldsLE::Eg& e, vb gated, vi& stt, vi& pos, vi& delay, vi& inc0, vi& inc1,
+                   vi& inc2, vi& inc_sus, vi& inc_rel, vi& state_out, std::size_t vl) {
+    load_run(base, at, e.a, vl, stt, pos, delay, inc0, inc1, inc2, inc_sus, inc_rel);
+    vi l0, l1, l2, l3, rel, delay_target;
+    load_run(base, at, e.b, vl, l0, l1, l2, l3, rel, delay_target);
     // state 0: the delay
     const vb s0 = eqx(stt, 0, vl);
     vb ddone;
-    const vi dnew = step_up(delay, Vi(e.delay_target), kBlockLE, ddone, vl);
+    const vi dnew = step_up(delay, delay_target, kBlockLE, ddone, vl);
     delay = sel(s0, dnew, delay, vl);
     // states 1 / 3 / 5 / 7 / 8: one step of pos, its target and step by state
     const vb s1 = eqx(stt, 1, vl), s3 = eqx(stt, 3, vl), s5 = eqx(stt, 5, vl), s7 = eqx(stt, 7, vl), s8 = eqx(stt, 8, vl);
-    const vi target = sel(s1, l1, sel(s3, l2, sel(s8, Vi(e.release_level), l3, vl), vl), vl);
-    const vi inc = sel(s1, Vi(e.inc0), sel(s3, Vi(e.inc1), sel(s5, Vi(e.inc2), sel(s7, Vi(e.inc_sustain), Vi(e.inc_release), vl), vl), vl), vl);
+    const vi target = sel(s1, l1, sel(s3, l2, sel(s8, rel, l3, vl), vl), vl);
+    const vi inc = sel(s1, inc0, sel(s3, inc1, sel(s5, inc2, sel(s7, inc_sus, inc_rel, vl), vl), vl), vl);
     const vb moving = __riscv_vmor_mm_b32(__riscv_vmor_mm_b32(s1, s3, vl), __riscv_vmor_mm_b32(__riscv_vmor_mm_b32(s5, s7, vl), s8, vl), vl);
     vb pdone;
     const vi pnew = step(pos, target, inc, pdone, vl);
@@ -137,25 +311,92 @@ inline void mod_eg(const std::uint8_t* base, vu at, const FieldsLE::Eg& e, vb ga
     vi ns = sel(__riscv_vmand_mm_b32(le3, __riscv_vmsne_vv_i32m1_b32(pos, l3, vl), vl), splat(5, vl), splat(7, vl), vl);
     ns = sel(__riscv_vmand_mm_b32(le1, __riscv_vmsne_vv_i32m1_b32(pos, l2, vl), vl), splat(3, vl), ns, vl);
     ns = sel(__riscv_vmand_mm_b32(s0, __riscv_vmsne_vv_i32m1_b32(pos, l1, vl), vl), splat(1, vl), ns, vl);
-    state = sel(adv, ns, stt, vl);
+    state_out = sel(adv, ns, stt, vl);
 }
 
 } // namespace
 
 void control_le(LanesLE& L, const FieldsLE& F, const ControlTablesLE& t) {
+    // In phases, a loop over the lanes each, so few vector registers are live at once (the X280 pays
+    // dearly for spills); the amp EG first, since it decides which lanes the kernel keeps. Values a
+    // later phase needs go through the lanes (unit-stride).
     const std::size_t n = L.n;
-    for (std::size_t k = 0, vl; k < n; k += vl) {
-        vl = __riscv_vsetvl_e32m1(n - k);
-        const vu at = __riscv_vle32_v_u32m1(L.voice + k, vl);
-        std::uint8_t* const base = L.base;
-        const auto Vi = [&](std::uint32_t off) { return vgi(base, at, off, vl); };
-        const auto Vf = [&](std::uint32_t off) { return vgf(base, at, off, vl); };
-        vb flag = __riscv_vmclr_m_b32(vl);              // lanes leaving the steady states
-        const vb gated = __riscv_vmsne_vx_i32m1_b32(ld(L.gated + k, vl), 0, vl);
-        const vf one = splatf(1.0f, vl), mone = splatf(-1.0f, vl), half = splatf(0.5f, vl), zero = splatf(0.0f, vl);
+    std::uint8_t* const base = L.base;
+#define HVYXG_LANES for (std::size_t k = 0, vl; k < n; k += vl)
+#define HVYXG_SETUP                                                                                    \
+    vl = __riscv_vsetvl_e32m1(n - k);                                                                    \
+    const vu at = __riscv_vle32_v_u32m1(L.voice + k, vl);                                              \
+    const vf one = splatf(1.0f, vl), mone = splatf(-1.0f, vl), half = splatf(0.5f, vl), zero = splatf(0.0f, vl); \
+    (void)one, (void)mone, (void)half, (void)zero;                                                      \
+    vb d;                                                                                              \
+    (void)d;
+    // ── amp EG: which lanes stay ───────────────────────────────────────────────────────────────────
+    HVYXG_LANES {
+        HVYXG_SETUP
+        vb flag = __riscv_vmclr_m_b32(vl);
+        vi stt, x, hold, xstep, gp_old, g_old, slope_i, icpt_i;
+        load_run(base, at, F.amp_a, vl, stt, x, hold, xstep, gp_old, g_old, slope_i, icpt_i);
+        vi ai0, ai1, ai2, ai3, al0, al1, al2, al3;
+        load_run(base, at, F.amp_b, vl, ai0, ai1, ai2, ai3, al0, al1, al2, al3);
+        vi inc_rel, d1rate, d2rate;
+        load_run(base, at, F.amp_c, vl, inc_rel, d1rate, d2rate);
+        const vf gain_prev = asf(g_old);
+        vf gain;
+        vb fin;
+        {
+            const vb s0 = eqx(stt, 0, vl), s1 = eqx(stt, 1, vl), s2 = eqx(stt, 2, vl), s3 = eqx(stt, 3, vl), s4 = eqx(stt, 4, vl),
+                     s5 = eqx(stt, 5, vl), s6 = eqx(stt, 6, vl), s7 = eqx(stt, 7, vl), s8 = eqx(stt, 8, vl), s9 = eqx(stt, 9, vl);
+            // hold states 0 / 2 / 4 step the hold toward 0; the others step x
+            const vb holding = __riscv_vmor_mm_b32(s0, __riscv_vmor_mm_b32(s2, s4, vl), vl);
+            const vi hinc = sel(s0, ld(L.amp_inc_attack + k, vl), sel(s2, ai1, ai2, vl), vl);
+            vb hdone;
+            const vi hnew = step(hold, splat(0, vl), hinc, hdone, vl);
+            hold = sel(holding, hnew, hold, vl);
+            const vi silent = splat(kSilent, vl);
+            const vi target = sel(s1, al1, sel(s3, al2, sel(__riscv_vmor_mm_b32(s5, s7, vl), al3, silent, vl), vl), vl);
+            const vi xinc = sel(__riscv_vmor_mm_b32(s1, s9, vl), xstep, sel(s3, ai1, sel(s5, ai2,
+                                sel(s6, ai3, sel(s7, splat(t.inc_sustain_glide, vl), inc_rel, vl), vl), vl), vl), vl);
+            const vb xmoving = __riscv_vmor_mm_b32(__riscv_vmor_mm_b32(__riscv_vmor_mm_b32(s1, s3, vl), __riscv_vmor_mm_b32(s5, s6, vl), vl),
+                                                   __riscv_vmor_mm_b32(__riscv_vmor_mm_b32(s7, s8, vl), s9, vl), vl);
+            vb xdone;
+            const vi xnew = step(x, target, xinc, xdone, vl);
+            x = sel(xmoving, xnew, x, vl);
+            // a stage end (states 0..5) leaves the steady states; so does an instant decay (rate 127)
+            const vb staged = __riscv_vmor_mm_b32(__riscv_vmand_mm_b32(holding, hdone, vl),
+                                                  __riscv_vmand_mm_b32(__riscv_vmor_mm_b32(s1, __riscv_vmor_mm_b32(s3, s5, vl), vl), xdone, vl), vl);
+            const vb instant = __riscv_vmor_mm_b32(__riscv_vmand_mm_b32(s2, eqx(d1rate, 127, vl), vl),
+                                                   __riscv_vmand_mm_b32(s4, eqx(d2rate, 127, vl), vl), vl);
+            flag = __riscv_vmor_mm_b32(flag, __riscv_vmor_mm_b32(staged, instant, vl), vl);
+            // the gain: linear stages from the line, the others by the law
+            const vb linear = __riscv_vmor_mm_b32(s1, s9, vl);
+            const vf line = __riscv_vfsub_vv_f32m1(asf(icpt_i), __riscv_vfmul_vv_f32m1(__riscv_vfcvt_f_x_v_f32m1(x, vl), asf(slope_i), vl), vl);
+            gain = self(linear, line, eg_gain(x, vl), vl);
+            fin = __riscv_vmor_mm_b32(__riscv_vmfle_vf_f32m1_b32(gain, 0.0f, vl), __riscv_vmand_mm_b32(s9, __riscv_vmsge_vx_i32m1_b32(x, kSilent, vl), vl), vl);
+            gain = self(fin, zero, gain, vl);
+        }
+        vi ticks, timer;
+        load_run(base, at, F.ticks, vl, ticks, timer);
+        const vb restart = __riscv_vmsge_vx_i32m1_b32(timer, 4096, vl);
 
-        // ── LFO (running: the fade factor 1) ─────────────────────────────────────────────────────
-        vf amod = Vf(F.lfo_amod);
+        const vb keep = __riscv_vmandn_mm_b32(__riscv_vmsne_vx_i32m1_b32(ld(L.ok + k, vl), 0, vl), flag, vl);
+        st(L.ok + k, sel(keep, splat(1, vl), splat(0, vl), vl), vl);
+        st(L.finished + k, sel(fin, splat(1, vl), splat(0, vl), vl), vl);
+        st(L.peak_reset + k, sel(restart, splat(1, vl), splat(0, vl), vl), vl);
+        stf(L.gain_prev + k, gain_prev, vl);
+        stf(L.gain + k, gain, vl);
+        store_run(base, at, keep, F.amp_a, vl, stt, x, hold, xstep, asi(gain_prev), asi(gain), slope_i, icpt_i);
+        store_run(base, at, keep, F.ticks, vl, __riscv_vadd_vx_i32m1(ticks, 1, vl),
+                  sel(restart, splat(0, vl), __riscv_vadd_vx_i32m1(timer, kBlockLE, vl), vl));
+    }
+    // ── LFO (running: the fade factor 1) ───────────────────────────────────────────────────────
+    HVYXG_LANES {
+        HVYXG_SETUP
+        const vb keep = __riscv_vmsne_vx_i32m1_b32(ld(L.ok + k, vl), 0, vl);
+        vi w, inv, phase_i, lfo_inc, pd_i, ad_i, fd_i, amod_i;
+        load_run(base, at, F.lfo_a, vl, w, inv, phase_i, lfo_inc, pd_i, ad_i, fd_i, amod_i);
+        vi sh_i, op_old, oa_old, of_old, ob_old;
+        load_run(base, at, F.lfo_b, vl, sh_i, op_old, oa_old, of_old, ob_old);
+        vf amod = asf(amod_i);
         {
             const vf tgt = ldf(L.amod_target + k, vl);
             const float glide = static_cast<float>(t.inc_sustain_glide);
@@ -165,11 +406,10 @@ void control_le(LanesLE& L, const FieldsLE& F, const ControlTablesLE& t) {
         }
         // the depths: element + controller (integer-valued floats below 2^24: the reference's double sums
         // are exact, so are these), clamped
-        const vf dp = __riscv_vfmin_vf_f32m1(__riscv_vfmax_vf_f32m1(__riscv_vfadd_vv_f32m1(Vf(F.lfo_pitch_depth), ldf(L.pmod + k, vl), vl), 0.0f, vl), 21845.0f, vl);
-        const vf da = __riscv_vfmin_vf_f32m1(__riscv_vfmax_vf_f32m1(__riscv_vfadd_vv_f32m1(Vf(F.lfo_amp_depth), amod, vl), 0.0f, vl), static_cast<float>(128 << 12), vl);
-        const vf df = __riscv_vfmin_vf_f32m1(__riscv_vfmax_vf_f32m1(__riscv_vfadd_vv_f32m1(Vf(F.lfo_filter_depth), ldf(L.fmod + k, vl), vl), 0.0f, vl), 262144.0f, vl);
-        const vi w = Vi(F.lfo_wave), inv = Vi(F.lfo_invert);
-        const vu ph = __riscv_vreinterpret_v_i32m1_u32m1(Vi(F.lfo_phase));
+        const vf dp = __riscv_vfmin_vf_f32m1(__riscv_vfmax_vf_f32m1(__riscv_vfadd_vv_f32m1(asf(pd_i), ldf(L.pmod + k, vl), vl), 0.0f, vl), 21845.0f, vl);
+        const vf da = __riscv_vfmin_vf_f32m1(__riscv_vfmax_vf_f32m1(__riscv_vfadd_vv_f32m1(asf(ad_i), amod, vl), 0.0f, vl), static_cast<float>(128 << 12), vl);
+        const vf df = __riscv_vfmin_vf_f32m1(__riscv_vfmax_vf_f32m1(__riscv_vfadd_vv_f32m1(asf(fd_i), ldf(L.fmod + k, vl), vl), 0.0f, vl), 262144.0f, vl);
+        const vu ph = __riscv_vreinterpret_v_i32m1_u32m1(phase_i);
         const vf sgn_p = self(__riscv_vmsne_vx_i32m1_b32(__riscv_vand_vx_i32m1(inv, 4, vl), 0, vl), mone, one, vl);
         const vf sgn_a = self(__riscv_vmsne_vx_i32m1_b32(__riscv_vand_vx_i32m1(inv, 2, vl), 0, vl), mone, one, vl);
         const vf sgn_f = self(__riscv_vmsne_vx_i32m1_b32(__riscv_vand_vx_i32m1(inv, 1, vl), 0, vl), mone, one, vl);
@@ -212,7 +452,7 @@ void control_le(LanesLE& L, const FieldsLE& F, const ControlTablesLE& t) {
             wp = self(is_sq, qp, wp, vl), wa = self(is_sq, qa, wa, vl), wf = self(is_sq, qf, wf, vl);
         }
         {   // S&H: the value drawn (begin)
-            const vf sh = Vf(F.lfo_sh);
+            const vf sh = asf(sh_i);
             const vf hp = __riscv_vfmul_vv_f32m1(__riscv_vfmul_vf_f32m1(sh, 0.5f, vl), sgn_p, vl);
             const vf ha = __riscv_vfrsub_vf_f32m1(__riscv_vfmul_vv_f32m1(__riscv_vfmul_vf_f32m1(sh, 0.5f, vl), sgn_a, vl), 0.5f, vl);
             const vf hf = __riscv_vfadd_vv_f32m1(__riscv_vfmul_vv_f32m1(__riscv_vfmul_vf_f32m1(sh, -0.5f, vl), sgn_f, vl), self(w8, half, zero, vl), vl);
@@ -224,21 +464,34 @@ void control_le(LanesLE& L, const FieldsLE& F, const ControlTablesLE& t) {
         const vi out_filter = ftol_mul(df, wf, vl);
         const vb biased = __riscv_vmnor_mm_b32(__riscv_vmand_mm_b32(__riscv_vmsge_vx_i32m1_b32(w, 5, vl), __riscv_vmsle_vx_i32m1_b32(w, 8, vl), vl), eqx(w, 12, vl), vl);
         const vi out_bias = sel(biased, trunc_f(__riscv_vfmul_vf_f32m1(df, 0.5f, vl), vl), splat(0, vl), vl);
-        const vu next = __riscv_vand_vx_u32m1(__riscv_vadd_vv_u32m1(ph, __riscv_vreinterpret_v_i32m1_u32m1(Vi(F.lfo_inc)), vl), 0xFFFFF, vl);
+        const vu next = __riscv_vand_vx_u32m1(__riscv_vadd_vv_u32m1(ph, __riscv_vreinterpret_v_i32m1_u32m1(lfo_inc), vl), 0xFFFFF, vl);
         const vb quad = __riscv_vmsne_vx_u32m1_b32(__riscv_vand_vx_u32m1(__riscv_vxor_vv_u32m1(next, ph, vl), 0xC0000, vl), 0, vl);
         const vi sh_flag = sel(quad, splat(1, vl), ld(L.sh_flag + k, vl), vl);
 
-        // ── pitch EG, portamento, the phase increment ────────────────────────────────────────────
-        vi peg_state, peg_pos, peg_delay;
-        mod_eg(base, at, F.eg[0], gated, peg_state, peg_pos, peg_delay, vl);
-        vb d;
-        const vi porta = step(Vi(F.porta_pos), splat(0, vl), Vi(F.porta_step), d, vl);
+        st(L.sh_flag + k, sh_flag, vl);
+        st(L.out_pitch + k, out_pitch, vl);
+        st(L.out_amp + k, out_amp, vl);
+        st(L.out_filter + k, out_filter, vl);
+        st(L.out_bias + k, out_bias, vl);
+        store_run(base, at, keep, F.lfo_a, vl, w, inv, __riscv_vreinterpret_v_u32m1_i32m1(next), lfo_inc, pd_i, ad_i, fd_i, asi(amod));
+        store_run(base, at, keep, F.lfo_b, vl, sh_i, out_pitch, out_amp, out_filter, out_bias);
+    }
+    // ── pitch and filter EGs, portamento, the phase increment, the cutoff ──────────────────────────
+    HVYXG_LANES {
+        HVYXG_SETUP
+        const vb keep = __riscv_vmsne_vx_i32m1_b32(ld(L.ok + k, vl), 0, vl);
+        const vb gated = __riscv_vmsne_vx_i32m1_b32(ld(L.gated + k, vl), 0, vl);
+        const vi out_pitch = ld(L.out_pitch + k, vl), out_filter = ld(L.out_filter + k, vl), out_bias = ld(L.out_bias + k, vl);
+        vi pe_s, pe_pos, pe_delay, pe_i0, pe_i1, pe_i2, pe_is, pe_ir, pe_state;
+        mod_eg(base, at, F.eg[0], gated, pe_s, pe_pos, pe_delay, pe_i0, pe_i1, pe_i2, pe_is, pe_ir, pe_state, vl);
+        vi pb_old, porta_old, porta_step, inc_old, cutoff_old, ct_old, fprev_i, fnew_old;
+        load_run(base, at, F.pitch, vl, pb_old, porta_old, porta_step, inc_old, cutoff_old, ct_old, fprev_i, fnew_old);
+        const vi porta = step(porta_old, splat(0, vl), porta_step, d, vl);
         const vi pitch_base = ld(L.pitch_base + k, vl);
         vi inc;
         {
             vi b = __riscv_vmax_vx_i32m1(__riscv_vmin_vx_i32m1(__riscv_vadd_vv_i32m1(pitch_base, porta, vl), 0x80000, vl), -0x80000, vl);
-            const vi tune = sel(__riscv_vmslt_vx_i32m1_b32(Vi(F.pos_hi), 0, vl), splat(0, vl), Vi(F.loop_tune), vl);
-            b = __riscv_vadd_vv_i32m1(__riscv_vadd_vv_i32m1(__riscv_vadd_vv_i32m1(b, peg_pos, vl), out_pitch, vl), tune, vl);
+            b = __riscv_vadd_vv_i32m1(__riscv_vadd_vv_i32m1(__riscv_vadd_vv_i32m1(b, pe_pos, vl), out_pitch, vl), ld(L.loop_tune + k, vl), vl);
             b = __riscv_vmax_vx_i32m1(__riscv_vmin_vx_i32m1(b, 0x80000, vl), -0x80000, vl);
             const vi v = __riscv_vsra_vx_i32m1(b, 6, vl);
             const vu off = __riscv_vsll_vx_u32m1(__riscv_vreinterpret_v_i32m1_u32m1(__riscv_vand_vx_i32m1(v, 0x3FF, vl)), 2, vl);
@@ -247,127 +500,71 @@ void control_le(LanesLE& L, const FieldsLE& F, const ControlTablesLE& t) {
         }
 
         // ── filter EG, cutoff glide, the coefficient ─────────────────────────────────────────────
-        vi feg_state, feg_pos, feg_delay;
-        mod_eg(base, at, F.eg[1], gated, feg_state, feg_pos, feg_delay, vl);
+        vi fe_s, fe_pos, fe_delay, fe_i0, fe_i1, fe_i2, fe_is, fe_ir, fe_state;
+        mod_eg(base, at, F.eg[1], gated, fe_s, fe_pos, fe_delay, fe_i0, fe_i1, fe_i2, fe_is, fe_ir, fe_state, vl);
         const vi cutoff_target = ld(L.cutoff_target + k, vl);
-        const vi cutoff = step(Vi(F.cutoff_cur), cutoff_target, splat(t.inc_cutoff_glide, vl), d, vl);
+        const vi cutoff = step(cutoff_old, cutoff_target, splat(t.inc_cutoff_glide, vl), d, vl);
         vf f_new, f_prev;
         {
-            vi lc = __riscv_vmax_vx_i32m1(__riscv_vmin_vx_i32m1(__riscv_vadd_vv_i32m1(cutoff, feg_pos, vl), 0x100000, vl), 0x80000, vl);
+            vi lc = __riscv_vmax_vx_i32m1(__riscv_vmin_vx_i32m1(__riscv_vadd_vv_i32m1(cutoff, fe_pos, vl), 0x100000, vl), 0x80000, vl);
             lc = __riscv_vmax_vx_i32m1(__riscv_vmin_vx_i32m1(__riscv_vadd_vv_i32m1(lc, out_bias, vl), 0x100000, vl), 0x80000, vl);
             lc = __riscv_vmin_vv_i32m1(lc, ld(L.ceiling + k, vl), vl);
             lc = __riscv_vmax_vx_i32m1(__riscv_vsub_vv_i32m1(lc, out_filter, vl), 0, vl);
             const vi m = __riscv_vadd_vx_i32m1(__riscv_vand_vx_i32m1(__riscv_vsra_vx_i32m1(lc, 8, vl), 255, vl), 256, vl);
             f_new = __riscv_vfmin_vf_f32m1(__riscv_vfmul_vv_f32m1(__riscv_vfcvt_f_x_v_f32m1(m, vl),
                                                                    pow2(__riscv_vsub_vx_i32m1(__riscv_vsra_vx_i32m1(lc, 16, vl), 24, vl), vl), vl), 1.0f, vl);
-            const vf fp = Vf(F.f_prev);
+            const vf fp = asf(fprev_i);
             f_prev = self(__riscv_vmflt_vf_f32m1_b32(fp, 0.0f, vl), f_new, fp, vl);
         }
 
-        // ── amp EG ──────────────────────────────────────────────────────────────────────────────
-        const vi stt = Vi(F.amp_state);
-        vi x = Vi(F.amp_x), hold = Vi(F.amp_hold);
-        const vf gain_prev = Vf(F.amp_gain);
-        vf gain;
-        vb fin;
-        {
-            const vb s0 = eqx(stt, 0, vl), s1 = eqx(stt, 1, vl), s2 = eqx(stt, 2, vl), s3 = eqx(stt, 3, vl), s4 = eqx(stt, 4, vl),
-                     s5 = eqx(stt, 5, vl), s6 = eqx(stt, 6, vl), s7 = eqx(stt, 7, vl), s8 = eqx(stt, 8, vl), s9 = eqx(stt, 9, vl);
-            // hold states 0 / 2 / 4 step the hold toward 0; the others step x
-            const vb holding = __riscv_vmor_mm_b32(s0, __riscv_vmor_mm_b32(s2, s4, vl), vl);
-            const vi inc1 = Vi(F.amp_inc1), inc2 = Vi(F.amp_inc2);
-            const vi hinc = sel(s0, ld(L.amp_inc_attack + k, vl), sel(s2, inc1, inc2, vl), vl);
-            vb hdone;
-            const vi hnew = step(hold, splat(0, vl), hinc, hdone, vl);
-            hold = sel(holding, hnew, hold, vl);
-            const vi silent = splat(kSilent, vl);
-            const vi target = sel(s1, Vi(F.amp_level1), sel(s3, Vi(F.amp_level2),
-                                  sel(__riscv_vmor_mm_b32(s5, s7, vl), Vi(F.amp_level3), silent, vl), vl), vl);
-            const vi xinc = sel(__riscv_vmor_mm_b32(s1, s9, vl), Vi(F.amp_xstep), sel(s3, inc1, sel(s5, inc2,
-                                sel(s6, Vi(F.amp_inc3), sel(s7, splat(t.inc_sustain_glide, vl), Vi(F.amp_inc_release), vl), vl), vl), vl), vl);
-            const vb xmoving = __riscv_vmor_mm_b32(__riscv_vmor_mm_b32(__riscv_vmor_mm_b32(s1, s3, vl), __riscv_vmor_mm_b32(s5, s6, vl), vl),
-                                                   __riscv_vmor_mm_b32(__riscv_vmor_mm_b32(s7, s8, vl), s9, vl), vl);
-            vb xdone;
-            const vi xnew = step(x, target, xinc, xdone, vl);
-            x = sel(xmoving, xnew, x, vl);
-            // a stage end (states 0..5) leaves the steady states; so does an instant decay (rate 127)
-            const vb staged = __riscv_vmor_mm_b32(__riscv_vmand_mm_b32(holding, hdone, vl),
-                                                  __riscv_vmand_mm_b32(__riscv_vmor_mm_b32(s1, __riscv_vmor_mm_b32(s3, s5, vl), vl), xdone, vl), vl);
-            const vb instant = __riscv_vmor_mm_b32(__riscv_vmand_mm_b32(s2, eqx(Vi(F.amp_decay1_rate), 127, vl), vl),
-                                                   __riscv_vmand_mm_b32(s4, eqx(Vi(F.amp_decay2_rate), 127, vl), vl), vl);
-            flag = __riscv_vmor_mm_b32(flag, __riscv_vmor_mm_b32(staged, instant, vl), vl);
-            // the gain: linear stages from the line, the others by the law
-            const vb linear = __riscv_vmor_mm_b32(s1, s9, vl);
-            const vf line = __riscv_vfsub_vv_f32m1(Vf(F.amp_intercept), __riscv_vfmul_vv_f32m1(__riscv_vfcvt_f_x_v_f32m1(x, vl), Vf(F.amp_slope), vl), vl);
-            gain = self(linear, line, eg_gain(x, vl), vl);
-            fin = __riscv_vmor_mm_b32(__riscv_vmfle_vf_f32m1_b32(gain, 0.0f, vl), __riscv_vmand_mm_b32(s9, __riscv_vmsge_vx_i32m1_b32(x, kSilent, vl), vl), vl);
-            gain = self(fin, zero, gain, vl);
-        }
-        const vi timer = Vi(F.peak_timer);
-        const vb restart = __riscv_vmsge_vx_i32m1_b32(timer, 4096, vl);
-
-        // ── the lanes the kernel keeps: everything written from here on, to them alone ───────────
-        const vb keep = __riscv_vmandn_mm_b32(__riscv_vmsne_vx_i32m1_b32(ld(L.ok + k, vl), 0, vl), flag, vl);
-        st(L.ok + k, sel(keep, splat(1, vl), splat(0, vl), vl), vl);
-        vput(base, at, keep, F.lfo_amod, amod, vl);
-        vput(base, at, keep, F.out_pitch, out_pitch, vl);
-        vput(base, at, keep, F.out_amp, out_amp, vl);
-        vput(base, at, keep, F.out_filter, out_filter, vl);
-        vput(base, at, keep, F.out_bias, out_bias, vl);
-        vput(base, at, keep, F.lfo_phase, __riscv_vreinterpret_v_u32m1_i32m1(next), vl);
-        st(L.sh_flag + k, sh_flag, vl);
-        vput(base, at, keep, F.eg[0].state, peg_state, vl);
-        vput(base, at, keep, F.eg[0].pos, peg_pos, vl);
-        vput(base, at, keep, F.eg[0].delay, peg_delay, vl);
-        vput(base, at, keep, F.eg[1].state, feg_state, vl);
-        vput(base, at, keep, F.eg[1].pos, feg_pos, vl);
-        vput(base, at, keep, F.eg[1].delay, feg_delay, vl);
-        vput(base, at, keep, F.porta_pos, porta, vl);
-        vput(base, at, keep, F.pitch_base, pitch_base, vl);
-        vput(base, at, keep, F.inc, inc, vl);
-        vput(base, at, keep, F.cutoff_target, cutoff_target, vl);
-        vput(base, at, keep, F.cutoff_cur, cutoff, vl);
-        vput(base, at, keep, F.f_new, f_new, vl);
-        vput(base, at, keep, F.f_prev, f_prev, vl);
-        vput(base, at, keep, F.amp_x, x, vl);
-        vput(base, at, keep, F.amp_hold, hold, vl);
-        vput(base, at, keep, F.amp_gain_prev, gain_prev, vl);
-        vput(base, at, keep, F.amp_gain, gain, vl);
-        st(L.finished + k, sel(fin, splat(1, vl), splat(0, vl), vl), vl);
-        vput(base, at, keep, F.stage_ticks, __riscv_vadd_vx_i32m1(Vi(F.stage_ticks), 1, vl), vl);
-        vput(base, at, keep, F.peak_timer, sel(restart, splat(0, vl), __riscv_vadd_vx_i32m1(timer, kBlockLE, vl), vl), vl);
-        st(L.peak_reset + k, sel(restart, splat(1, vl), splat(0, vl), vl), vl);
-
-        // ── output stage: glides, gains, the mix ramps ───────────────────────────────────────────
-        const vi level = step(Vi(F.level_x), ld(L.level_t + k, vl), splat(t.inc_sustain_glide, vl), d, vl);
-        const vi pan0 = step(Vi(F.pan_x[0]), ld(L.pan_t[0] + k, vl), splat(t.inc_pan, vl), d, vl);
-        const vi pan1 = step(Vi(F.pan_x[1]), ld(L.pan_t[1] + k, vl), splat(t.inc_pan, vl), d, vl);
-        vput(base, at, keep, F.level_x, level, vl);
-        vput(base, at, keep, F.pan_x[0], pan0, vl);
-        vput(base, at, keep, F.pan_x[1], pan1, vl);
-        const vb first = eqx(ld(L.mixed + k, vl), 0, vl);
-        // one output's ramp: from the previous block's gain (its own on the first block) to this one's
-        const auto emit = [&](std::size_t o, vf g) {
-            const vf gp = self(first, g, Vf(F.gain_prev[o]), vl);
-            vput(base, at, keep, F.mix_from[o], __riscv_vfmul_vf_f32m1(__riscv_vfmul_vv_f32m1(gain_prev, gp, vl), kBusScale, vl), vl);
-            vput(base, at, keep, F.mix_to[o], __riscv_vfmul_vf_f32m1(__riscv_vfmul_vv_f32m1(gain, g, vl), kBusScale, vl), vl);
-            vput(base, at, keep, F.gain_prev[o], g, vl);
-        };
-        for (std::size_t i = 0; i < 4; ++i) {
-            const vi s = step(Vi(F.send_x[i]), ld(L.send_t[i] + k, vl), splat(t.inc_send, vl), d, vl);
-            vput(base, at, keep, F.send_x[i], s, vl);
+        store_run(base, at, keep, F.eg[0].a, vl, pe_state, pe_pos, pe_delay, pe_i0, pe_i1, pe_i2, pe_is, pe_ir);
+        store_run(base, at, keep, F.eg[1].a, vl, fe_state, fe_pos, fe_delay, fe_i0, fe_i1, fe_i2, fe_is, fe_ir);
+        store_run(base, at, keep, F.pitch, vl, pitch_base, porta, porta_step, inc, cutoff, cutoff_target, asi(f_prev), asi(f_new));
+    }
+    // ── output stage: glides, gains, the mix ramps ──────────────────────────────────────────────────
+    HVYXG_LANES {
+        HVYXG_SETUP
+        const vb keep = __riscv_vmsne_vx_i32m1_b32(ld(L.ok + k, vl), 0, vl);
+        const vi out_amp = ld(L.out_amp + k, vl);
+        const vf gain_prev = ldf(L.gain_prev + k, vl), gain = ldf(L.gain + k, vl);
+        vi level_old, pan0_old, pan1_old, s0_old, s1_old, s2_old, s3_old;
+        load_run(base, at, F.out, vl, level_old, pan0_old, pan1_old, s0_old, s1_old, s2_old, s3_old);
+        vi gp0, gp1, gp2, gp3, gp4, gp5, gp6;
+        load_run(base, at, F.gains, vl, gp0, gp1, gp2, gp3, gp4, gp5, gp6);
+        const vi level = step(level_old, ld(L.level_t + k, vl), splat(t.inc_sustain_glide, vl), d, vl);
+        const vi pan0 = step(pan0_old, ld(L.pan_t[0] + k, vl), splat(t.inc_pan, vl), d, vl);
+        const vi pan1 = step(pan1_old, ld(L.pan_t[1] + k, vl), splat(t.inc_pan, vl), d, vl);
+        const vi sx0 = step(s0_old, ld(L.send_t[0] + k, vl), splat(t.inc_send, vl), d, vl);
+        const vi sx1 = step(s1_old, ld(L.send_t[1] + k, vl), splat(t.inc_send, vl), d, vl);
+        const vi sx2 = step(s2_old, ld(L.send_t[2] + k, vl), splat(t.inc_send, vl), d, vl);
+        const vi sx3 = step(s3_old, ld(L.send_t[3] + k, vl), splat(t.inc_send, vl), d, vl);
+        // the gains, left / right, of a send: g(pan + send + level + amp LFO), muted from 255 units
+        const auto gains_of = [&](vi s, vf& gl, vf& gr) {
             const vi tt = __riscv_vadd_vv_i32m1(__riscv_vadd_vv_i32m1(s, level, vl), out_amp, vl);
             const vb mute = __riscv_vmsge_vx_i32m1_b32(tt, 0xFF000, vl);
-            const vf gl = self(mute, zero, eg_gain(__riscv_vadd_vv_i32m1(pan0, tt, vl), vl), vl);
-            const vf gr = self(mute, zero, eg_gain(__riscv_vadd_vv_i32m1(pan1, tt, vl), vl), vl);
-            switch (i) {
-            case 0: emit(0, gl); emit(1, gr); break;
-            case 1: emit(2, __riscv_vfmul_vf_f32m1(__riscv_vfadd_vv_f32m1(gl, gr, vl), 0.5f, vl)); break;
-            case 2: emit(3, gl); emit(4, gr); break;
-            default: emit(5, gl); emit(6, gr); break;
-            }
-        }
+            gl = self(mute, zero, eg_gain(__riscv_vadd_vv_i32m1(pan0, tt, vl), vl), vl);
+            gr = self(mute, zero, eg_gain(__riscv_vadd_vv_i32m1(pan1, tt, vl), vl), vl);
+        };
+        vf g0, g1, g2, g3, g4, g5, g6, rl, rr;
+        gains_of(sx0, g0, g1);
+        gains_of(sx1, rl, rr);
+        g2 = __riscv_vfmul_vf_f32m1(__riscv_vfadd_vv_f32m1(rl, rr, vl), 0.5f, vl);
+        gains_of(sx2, g3, g4);
+        gains_of(sx3, g5, g6);
+        const vb first = eqx(ld(L.mixed + k, vl), 0, vl);
+        // a ramp from the previous block's gain (its own on the first block) to this one's
+        const auto from = [&](vf g, vi gp) {
+            return asi(__riscv_vfmul_vf_f32m1(__riscv_vfmul_vv_f32m1(gain_prev, self(first, g, asf(gp), vl), vl), kBusScale, vl));
+        };
+        const auto to = [&](vf g) { return asi(__riscv_vfmul_vf_f32m1(__riscv_vfmul_vv_f32m1(gain, g, vl), kBusScale, vl)); };
+
+        store_run(base, at, keep, F.out, vl, level, pan0, pan1, sx0, sx1, sx2, sx3);
+        store_run(base, at, keep, F.gains + 28, vl, from(g0, gp0), from(g1, gp1), from(g2, gp2), from(g3, gp3), from(g4, gp4), from(g5, gp5), from(g6, gp6));
+        store_run(base, at, keep, F.gains + 56, vl, to(g0), to(g1), to(g2), to(g3), to(g4), to(g5), to(g6));
+        store_run(base, at, keep, F.gains, vl, asi(g0), asi(g1), asi(g2), asi(g3), asi(g4), asi(g5), asi(g6));
     }
+#undef HVYXG_LANES
+#undef HVYXG_SETUP
 }
 
 } // namespace hvyxg::accel::rvv

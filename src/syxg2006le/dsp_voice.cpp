@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <initializer_list>
 #if defined(HVYXG_CHECK_CONTROL)
 #include <cstdio>
 #endif
@@ -907,82 +908,63 @@ accel::ControlTablesLE DspVoice::control_tables(const RateTables& t) {
     return {t.pitch.data(), t.inc_decay[kCutoffGlideRate], t.inc_decay[kSustainGlideRate], t.inc_pan, t.inc_send};
 }
 
+/// Offsets each 4 past the one before, from `first`.
+constexpr bool run_ok_list(std::size_t first, std::initializer_list<std::size_t> rest) {
+    std::size_t at = first;
+    for (const std::size_t o : rest) {
+        if (o != at + 4) return false;
+        at = o;
+    }
+    return true;
+}
+template <class T> constexpr bool run_ok(std::size_t first, std::initializer_list<std::size_t> rest) { return run_ok_list(first, rest); }
+
 // The kernel reaches the voices' fields by offset (DspVoice is not standard-layout, but has no virtual
 // bases: GCC and Clang give offsetof its plain meaning).
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Winvalid-offsetof"
 const accel::FieldsLE& DspVoice::fields_le() {
+    // Each run is consecutive 32-bit words in the order FieldsLE gives: checked here, at compile time.
+#define HVYXG_RUN(T, first, ...) run_ok<T>(offsetof(T, first), {__VA_ARGS__})
+    static_assert(HVYXG_RUN(Lfo, wave, offsetof(Lfo, invert), offsetof(Lfo, phase), offsetof(Lfo, inc), offsetof(Lfo, pitch_depth),
+                            offsetof(Lfo, amp_depth), offsetof(Lfo, filter_depth), offsetof(Lfo, amod)));
+    static_assert(HVYXG_RUN(Lfo, sh, offsetof(Lfo, out_pitch), offsetof(Lfo, out_amp), offsetof(Lfo, out_filter), offsetof(Lfo, out_bias)));
+    static_assert(HVYXG_RUN(ModEg, state, offsetof(ModEg, pos), offsetof(ModEg, delay), offsetof(ModEg, inc), offsetof(ModEg, inc) + 4,
+                            offsetof(ModEg, inc) + 8, offsetof(ModEg, inc_sustain), offsetof(ModEg, inc_release)));
+    static_assert(HVYXG_RUN(ModEg, level, offsetof(ModEg, level) + 4, offsetof(ModEg, level) + 8, offsetof(ModEg, level) + 12,
+                            offsetof(ModEg, release_level), offsetof(ModEg, delay_target)));
+    static_assert(HVYXG_RUN(DspVoice, pitch_base_, offsetof(DspVoice, porta_pos_), offsetof(DspVoice, porta_step_), offsetof(DspVoice, inc_),
+                            offsetof(DspVoice, cutoff_cur_), offsetof(DspVoice, cutoff_target_), offsetof(DspVoice, f_prev_),
+                            offsetof(DspVoice, f_new_)));
+    static_assert(HVYXG_RUN(AmpEg, state, offsetof(AmpEg, x), offsetof(AmpEg, hold), offsetof(AmpEg, xstep), offsetof(AmpEg, gain_prev),
+                            offsetof(AmpEg, gain), offsetof(AmpEg, slope), offsetof(AmpEg, intercept), offsetof(AmpEg, inc),
+                            offsetof(AmpEg, inc) + 4, offsetof(AmpEg, inc) + 8, offsetof(AmpEg, inc) + 12, offsetof(AmpEg, level),
+                            offsetof(AmpEg, level) + 4, offsetof(AmpEg, level) + 8, offsetof(AmpEg, level) + 12,
+                            offsetof(AmpEg, inc_release), offsetof(AmpEg, decay1_rate), offsetof(AmpEg, decay2_rate)));
+    static_assert(HVYXG_RUN(DspVoice, stage_ticks_, offsetof(DspVoice, peak_timer_)));
+    static_assert(HVYXG_RUN(DspVoice, level_x_, offsetof(DspVoice, pan_x_), offsetof(DspVoice, pan_x_) + 4, offsetof(DspVoice, send_x_),
+                            offsetof(DspVoice, send_x_) + 4, offsetof(DspVoice, send_x_) + 8, offsetof(DspVoice, send_x_) + 12));
+    static_assert(offsetof(DspVoice, mix_from_) == offsetof(DspVoice, gain_prev_) + 28 &&
+                  offsetof(DspVoice, mix_to_) == offsetof(DspVoice, mix_from_) + 28);
+#undef HVYXG_RUN
+    static_assert(sizeof(gain_prev_) == 28 && sizeof(mix_from_) == 28 && sizeof(mix_to_) == 28);
     static const accel::FieldsLE f = [] {
-        accel::FieldsLE r{};
         const auto at = [](std::size_t o) { return static_cast<std::uint32_t>(o); };
-        constexpr std::size_t lfo = offsetof(DspVoice, lfo_), amp = offsetof(DspVoice, eg_);
-        r.lfo_wave = at(lfo + offsetof(Lfo, wave));
-        r.lfo_invert = at(lfo + offsetof(Lfo, invert));
-        r.lfo_phase = at(lfo + offsetof(Lfo, phase));
-        r.lfo_inc = at(lfo + offsetof(Lfo, inc));
-        r.lfo_pitch_depth = at(lfo + offsetof(Lfo, pitch_depth));
-        r.lfo_amp_depth = at(lfo + offsetof(Lfo, amp_depth));
-        r.lfo_filter_depth = at(lfo + offsetof(Lfo, filter_depth));
-        r.lfo_amod = at(lfo + offsetof(Lfo, amod));
-        r.lfo_sh = at(lfo + offsetof(Lfo, sh));
-        r.out_pitch = at(lfo + offsetof(Lfo, out_pitch));
-        r.out_amp = at(lfo + offsetof(Lfo, out_amp));
-        r.out_filter = at(lfo + offsetof(Lfo, out_filter));
-        r.out_bias = at(lfo + offsetof(Lfo, out_bias));
+        accel::FieldsLE r{};
+        r.lfo_a = at(offsetof(DspVoice, lfo_) + offsetof(Lfo, wave));
+        r.lfo_b = at(offsetof(DspVoice, lfo_) + offsetof(Lfo, sh));
         for (std::size_t g = 0; g < 2; ++g) {
             const std::size_t e = g == 0 ? offsetof(DspVoice, peg_) : offsetof(DspVoice, feg_);
-            auto& d = r.eg[g];
-            d.state = at(e + offsetof(ModEg, state));
-            d.pos = at(e + offsetof(ModEg, pos));
-            d.inc0 = at(e + offsetof(ModEg, inc));
-            d.inc1 = d.inc0 + 4;
-            d.inc2 = d.inc0 + 8;
-            d.inc_sustain = at(e + offsetof(ModEg, inc_sustain));
-            d.inc_release = at(e + offsetof(ModEg, inc_release));
-            d.level1 = at(e + offsetof(ModEg, level)) + 4;
-            d.level2 = d.level1 + 4;
-            d.level3 = d.level1 + 8;
-            d.release_level = at(e + offsetof(ModEg, release_level));
-            d.delay = at(e + offsetof(ModEg, delay));
-            d.delay_target = at(e + offsetof(ModEg, delay_target));
+            r.eg[g].a = at(e + offsetof(ModEg, state));
+            r.eg[g].b = at(e + offsetof(ModEg, level));
         }
-        r.porta_pos = at(offsetof(DspVoice, porta_pos_));
-        r.porta_step = at(offsetof(DspVoice, porta_step_));
-        r.pos_hi = at(offsetof(DspVoice, pos_)) + 4;       // little-endian: the high word
-        r.loop_tune = at(offsetof(DspVoice, loop_tune_));
-        r.inc = at(offsetof(DspVoice, inc_));
-        r.pitch_base = at(offsetof(DspVoice, pitch_base_));
-        r.cutoff_cur = at(offsetof(DspVoice, cutoff_cur_));
-        r.cutoff_target = at(offsetof(DspVoice, cutoff_target_));
-        r.f_prev = at(offsetof(DspVoice, f_prev_));
-        r.f_new = at(offsetof(DspVoice, f_new_));
-        r.amp_state = at(amp + offsetof(AmpEg, state));
-        r.amp_x = at(amp + offsetof(AmpEg, x));
-        r.amp_hold = at(amp + offsetof(AmpEg, hold));
-        r.amp_xstep = at(amp + offsetof(AmpEg, xstep));
-        r.amp_inc1 = at(amp + offsetof(AmpEg, inc)) + 4;
-        r.amp_inc2 = r.amp_inc1 + 4;
-        r.amp_inc3 = r.amp_inc1 + 8;
-        r.amp_inc_release = at(amp + offsetof(AmpEg, inc_release));
-        r.amp_level1 = at(amp + offsetof(AmpEg, level)) + 4;
-        r.amp_level2 = r.amp_level1 + 4;
-        r.amp_level3 = r.amp_level1 + 8;
-        r.amp_decay1_rate = at(amp + offsetof(AmpEg, decay1_rate));
-        r.amp_decay2_rate = at(amp + offsetof(AmpEg, decay2_rate));
-        r.amp_gain_prev = at(amp + offsetof(AmpEg, gain_prev));
-        r.amp_gain = at(amp + offsetof(AmpEg, gain));
-        r.amp_slope = at(amp + offsetof(AmpEg, slope));
-        r.amp_intercept = at(amp + offsetof(AmpEg, intercept));
-        r.stage_ticks = at(offsetof(DspVoice, stage_ticks_));
-        r.peak_timer = at(offsetof(DspVoice, peak_timer_));
-        r.level_x = at(offsetof(DspVoice, level_x_));
-        for (std::size_t j = 0; j < 2; ++j) r.pan_x[j] = at(offsetof(DspVoice, pan_x_)) + 4 * static_cast<std::uint32_t>(j);
-        for (std::size_t j = 0; j < 4; ++j) r.send_x[j] = at(offsetof(DspVoice, send_x_)) + 4 * static_cast<std::uint32_t>(j);
-        for (std::size_t o = 0; o < kOutputs; ++o) {
-            r.gain_prev[o] = at(offsetof(DspVoice, gain_prev_)) + 4 * static_cast<std::uint32_t>(o);
-            r.mix_from[o] = at(offsetof(DspVoice, mix_from_)) + 4 * static_cast<std::uint32_t>(o);
-            r.mix_to[o] = at(offsetof(DspVoice, mix_to_)) + 4 * static_cast<std::uint32_t>(o);
-        }
+        r.pitch = at(offsetof(DspVoice, pitch_base_));
+        r.amp_a = at(offsetof(DspVoice, eg_) + offsetof(AmpEg, state));
+        r.amp_b = at(offsetof(DspVoice, eg_) + offsetof(AmpEg, inc));
+        r.amp_c = at(offsetof(DspVoice, eg_) + offsetof(AmpEg, inc_release));
+        r.ticks = at(offsetof(DspVoice, stage_ticks_));
+        r.out = at(offsetof(DspVoice, level_x_));
+        r.gains = at(offsetof(DspVoice, gain_prev_));
         return r;
     }();
     return f;
@@ -1013,6 +995,7 @@ void DspVoice::to_lanes(accel::LanesLE& L, std::size_t i, const RateTables& t, c
     L.pan_t[0][i] = c.pan_l << 12;
     L.pan_t[1][i] = c.pan_r << 12;
     for (std::size_t j = 0; j < 4; ++j) L.send_t[j][i] = std::min(c.send[j], 255) << 12;
+    L.loop_tune[i] = pos_ >= 0 ? loop_tune_ : 0;
     L.amp_inc_attack[i] = std::max<std::int32_t>(static_cast<std::int32_t>(static_cast<std::int64_t>(e.inc[0]) * 128 / 255), 1);
     L.sh_flag[i] = l.sh_flag;
     L.mixed[i] = mixed_;

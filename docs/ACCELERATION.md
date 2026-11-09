@@ -138,7 +138,25 @@ element a cycle on the X280: some 150 fields a voice), and the rest of control -
 loop, `controls()`, `begin`, filling the lanes -- is scalar and now the larger part, and it waits for
 each batch's kernel rather than overlapping it.
 
-**Next: the voices' state in lanes for good.** The per-block state lives in structure-of-arrays form in
+**The X280's costs, measured** (`vmembench`, Hira-V's `apps/bench`: 32 voices of 256, 1 KiB records,
+cycles an element): indexed 2.58, indexed segment of 8 fields 0.45, unit-stride 0.25, strided 1.39,
+indexed store 2.34. So the kernel now reads and writes the voices' fields as **runs** -- each voice's
+fields reordered into runs of up to 8 consecutive words (`FieldsLE`, checked at compile time), one
+segment load or store a run -- and only the active voices are touched (a structure-of-arrays layout over
+the whole pool would pay for every pooled object: with ~34 voices sounding of 256, more than segments).
+**Vector register spills are expensive** (a spill's address is computed from `vlenb`): the kernel runs
+in four phases (the amp EG first, as it decides which lanes stay; the LFO; pitch and filter; the output
+stage), a loop over the lanes each, passing values through the lanes (unit-stride). A 2006LE voice:
+0.153 % → 0.141 % of a core, exact.
+
+**What is left, and why:** a scalar load after vector stores waits for the vector queue to drain, and
+the scalar side reads the kernel's results straight away (`render_end`'s mix, `signal`'s increment,
+`from_lanes`), so the scalar and vector work still run one after the other; and `controls()`, `begin`,
+filling the lanes and the module's voice loop stay scalar. Next: the batch's whole block -- control,
+samples, filter, mix -- issued without a scalar read of a vector result in between (the scalar side
+working on the next batch's controls meanwhile), and `controls()` in lanes.
+
+**(Superseded) the voices' state in lanes for good.** The per-block state lives in structure-of-arrays form in
 the module (one array per field, indexed by voice object), DspVoice reaching its fields there: the
 kernel then reads and writes unit-stride (16 lanes in a couple of cycles, not 16), over all objects at
 once with the inactive masked, and nothing is filled or copied. Then `controls()` and `begin` in the

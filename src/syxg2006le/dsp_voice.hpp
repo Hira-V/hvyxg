@@ -175,17 +175,19 @@ private:
     StealFade steal_fade_;
     enum class State : std::uint8_t { Idle, Delay, Running };
 
+    // The EGs' and LFO's fields in the order the control kernel reads them, in runs of up to 8
+    // 32-bit words (accel/control_le.hpp: one segment load a run; fields_le checks).
     struct AmpEg {
         int state = 0;
         std::int32_t x = 0;
-        std::array<std::int32_t, 4> inc{}; // attack, decay1..3
-        std::int32_t inc_release = 0;
-        std::array<std::int32_t, 4> level{};
-        int attack_rate = 0, decay1_rate = 0, decay2_rate = 0, decay3_rate = 0;
         std::int32_t hold = 0;
+        std::int32_t xstep = 0;
         float gain_prev = 0.0f, gain = 0.0f;
         float slope = 0.0f, intercept = 0.0f;
-        std::int32_t xstep = 0;
+        std::array<std::int32_t, 4> inc{}; // attack, decay1..3
+        std::array<std::int32_t, 4> level{};
+        std::int32_t inc_release = 0;
+        int decay1_rate = 0, decay2_rate = 0, attack_rate = 0, decay3_rate = 0;
         bool recompute = false;
         bool linear_release = false;
         bool finished = false;
@@ -193,27 +195,29 @@ private:
     struct ModEg {
         int state = 7;
         std::int32_t pos = 0;
+        std::int32_t delay = 0;
         std::array<std::int32_t, 3> inc{};
-        std::int32_t inc_release = 0, inc_sustain = 0;
+        std::int32_t inc_sustain = 0, inc_release = 0;
         std::array<std::int32_t, 4> level{};
         std::int32_t release_level = 0;
-        std::int32_t delay = 0, delay_target = 0;
+        std::int32_t delay_target = 0;
         ModEgParams params;
     };
     struct Lfo {
-        int state = 2;
-        std::int32_t counter = 0, delay = 0, fade = 0;
-        float fade_factor = 1.0f;
+        int wave = 6;
+        int invert = 0;
         std::uint32_t phase = 0;
         std::int32_t inc = 0;
-        int wave = 6;
-        int invert = 0, fade_flags = 0;
         float pitch_depth = 0, amp_depth = 0, filter_depth = 0;
         float amod = 0.0f;
         float sh = 0.0f;
-        bool sh_flag = true;
-        // Outputs (1/65536 octave, attenuation × 4096).
+        // Outputs (1/65536 octave, attenuation × 4096): after sh, in the kernel's second run.
         std::int32_t out_pitch = 0, out_amp = 0, out_filter = 0, out_bias = 0;
+        int state = 2;
+        std::int32_t counter = 0, delay = 0, fade = 0;
+        float fade_factor = 1.0f;
+        int fade_flags = 0;
+        bool sh_flag = true;
     };
 
     void amp_init(const RateTables& t, const AmpEgParams& a);
@@ -235,8 +239,6 @@ private:
     /// Steal-score state: the signal peak and its reset timer (period
     /// 4096 samples), EG ticks in the current stage, L1 <= L2 <= L3 at note-on.
     float peak_ = 0.0f;
-    std::int32_t peak_timer_ = 0;
-    std::uint32_t stage_ticks_ = 0;
     bool amp_monotonic_ = true;
     bool ended_released_ = false;
     /// A note-off waiting for the next render (rate, damper).
@@ -262,34 +264,40 @@ private:
     bool one_shot_ = false;
     std::int64_t pos_ = 0;
     std::int32_t frac_ = 0;
-    std::int32_t inc_ = 0;
-    std::int32_t pitch_base_ = 0;
     std::int32_t loop_tune_ = 0;
-    std::int32_t porta_pos_ = 0, porta_step_ = 0;
 
     // Filter.
     Svf svf_;
-    std::int32_t cutoff_cur_ = 0, cutoff_target_ = 0;
-    float f_prev_ = 0.0f;
     float q_ = 1.0f;
     int filter_type_ = 0;
 
-    // Output stage: glided level, pan and send attenuations.
+    // The control kernel's runs (accel/control_le.hpp; fields_le checks they are contiguous):
+    // pitch and filter ...
+    std::int32_t pitch_base_ = 0;
+    std::int32_t porta_pos_ = 0, porta_step_ = 0;
+    std::int32_t inc_ = 0;
+    std::int32_t cutoff_cur_ = 0, cutoff_target_ = 0;
+    float f_prev_ = 0.0f;
+    float f_new_ = 0.0f;           // the filter coefficient at the block's end
+    // ... the steal score's tick counts (EG ticks in the current stage; the peak's reset timer,
+    // period 4096 samples) ...
+    std::uint32_t stage_ticks_ = 0;
+    std::int32_t peak_timer_ = 0;
+    // ... the output stage: glided level, pan and send attenuations ...
     std::int32_t level_x_ = 0;
     std::array<std::int32_t, 2> pan_x_{};
     std::array<std::int32_t, 4> send_x_{};
+    // ... and the per-output gains, the previous block's and the mix ramps' ends.
+    std::array<float, kOutputs> gain_prev_{};
+    std::array<float, kOutputs> mix_from_{}, mix_to_{};
 
     AmpEg eg_;
     AmpEgParams amp_;
     ModEg peg_, feg_;
     Lfo lfo_;
-    std::array<float, kOutputs> gain_prev_{};
     bool mixed_ = false;
-    /// The block's start gate (begin), the filter coefficient at its end and the mix ramps' ends
-    /// per output (control).
+    /// The block's start gate (begin).
     bool gated_ = false;
-    float f_new_ = 0.0f;
-    std::array<float, kOutputs> mix_from_{}, mix_to_{};
 };
 
 } // namespace hvyxg::syxg2006le
