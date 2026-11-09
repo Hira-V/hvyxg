@@ -50,9 +50,19 @@ inline void walk_lanes(std::int32_t pos, std::uint32_t frac, std::int32_t inc_in
     frac_out = f;
 }
 
-// Unsigned 16-bit samples at byte offsets `off` from `base`, as floats in [-1, 1).
+// Unsigned 16-bit samples at byte offsets `off` from `base`, as floats in [-1, 1). RVV 0.7.1's indices
+// are as wide as its elements (no 32-bit offsets to 16-bit samples), so there they are read one by one
+// for now (to do on the C920: aligned 32-bit word gathers and a shift a lane).
 inline vfloat32m2_t pcm16(const std::uint8_t* base, vuint32m2_t off, std::size_t vl) {
+#if defined(__riscv_xtheadvector)
+    alignas(64) std::uint32_t offs[256];
+    alignas(64) std::uint16_t s16[256];
+    __riscv_vse32_v_u32m2(offs, off, vl);
+    for (std::size_t j = 0; j < vl; ++j) s16[j] = static_cast<std::uint16_t>(base[offs[j]] | base[offs[j] + 1] << 8);
+    const vuint16m1_t u = __riscv_vle16_v_u16m1(s16, vl);
+#else
     const vuint16m1_t u = __riscv_vluxei32_v_u16m1(reinterpret_cast<const std::uint16_t*>(base), off, vl);
+#endif
     const vint16m1_t s = __riscv_vreinterpret_v_u16m1_i16m1(__riscv_vxor_vx_u16m1(u, 0x8000, vl));
     return __riscv_vfmul_vf_f32m2(__riscv_vfwcvt_f_x_v_f32m2(s, vl), 1.0f / 32768.0f, vl);
 }
