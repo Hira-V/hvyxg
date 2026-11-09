@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: BSD-3-Clause (see LICENSE)
 #include "steal_fade.hpp"
 #include "syxg2006le/tone_module.hpp"
+#if defined(HVYXG_CHECK_CONTROL)
+#include <cstdio>
+#endif
 #include "engine_tables.hpp"
 
 #include <algorithm>
@@ -1058,13 +1061,52 @@ void ToneModule2006::render(Buses& buses) {
         buses.dry_l.data(),    buses.dry_r.data(),    buses.reverb.data(),
         buses.chorus_l.data(), buses.chorus_r.data(), buses.variation_l.data(),
         buses.variation_r.data()};
-    // The voices in batches (as the S-YXG50's): each voice's control and samples (render_begin) in
-    // order -- the shared random generator advanced before each, as ever -- the filter across the batch,
-    // then each voice's EQ, fade and outputs in the same order (render_end).
+    // The voices in batches (docs/ACCELERATION.md, "Control across voices"): each voice's begin in
+    // order -- the shared random generator's draws in their order, as ever -- then the batch's control
+    // (no shared state), each voice's samples, the filter across the batch, then each voice's EQ, fade
+    // and outputs in voice order (render_end).
     Batch& bt = *batch_;
     std::size_t nb = 0;
     const auto flush = [&] {
         if (!nb) return;
+        if constexpr (accel::kControlLE) {
+            accel::LanesLE& L = bt.lanes;
+            L.base = reinterpret_cast<std::uint8_t*>(&objs_.front().dsp);
+            for (std::size_t i = 0; i < nb; ++i) bt.obj[i]->dsp.to_lanes(L, i, tables_, bt.controls[i]);
+            L.n = nb;
+#if defined(HVYXG_CHECK_CONTROL)
+            for (std::size_t i = 0; i < nb; ++i) bt.check[i] = bt.obj[i]->dsp;   // before the kernel writes them
+#endif
+            accel::control_le(L, DspVoice::fields_le(), DspVoice::control_tables(tables_));
+            // the lanes the kernel kept back, and those it does not take: the reference
+#if defined(HVYXG_CHECK_CONTROL)
+            {
+                static long lanes = 0, kept = 0;
+                for (std::size_t i = 0; i < nb; ++i) kept += L.ok[i] != 0;
+                if (((lanes += static_cast<long>(nb)) & ~0xFFFFL) != ((lanes - static_cast<long>(nb)) & ~0xFFFFL))
+                    std::fprintf(stderr, "control_le: %ld of %ld lanes by the kernel\n", kept, lanes);
+            }
+#endif
+            for (std::size_t i = 0; i < nb; ++i) {
+#if defined(HVYXG_CHECK_CONTROL)
+                if (L.ok[i]) {
+                    static int reported = 0;
+                    static long checked = 0;
+                    if ((++checked & 0xFFFF) == 1) std::fprintf(stderr, "control_le: %ld lanes checked\n", checked);
+                    DspVoice& ref = bt.check[i];
+                    ref.control(tables_, bt.controls[i]);
+                    bt.obj[i]->dsp.from_lanes(L, i, bt.controls[i]);
+                    if (reported < 20 && bt.obj[i]->dsp.differs_from(ref, "control_le")) ++reported;
+                    continue;
+                }
+#endif
+                if (L.ok[i]) bt.obj[i]->dsp.from_lanes(L, i, bt.controls[i]);
+                else bt.obj[i]->dsp.control(tables_, bt.controls[i]);
+            }
+        } else {
+            for (std::size_t i = 0; i < nb; ++i) bt.obj[i]->dsp.control(tables_, bt.controls[i]);
+        }
+        for (std::size_t i = 0; i < nb; ++i) bt.obj[i]->dsp.signal(ctx_.interpolation, tables_, bt.rows[i].data(), bt.svf[i]);
         std::array<float*, accel::kBatch> lp{}, bp{};
         std::array<float, accel::kBatch> f{}, df{}, q{};
         for (std::size_t i = 0; i < nb; ++i) {
@@ -1074,7 +1116,7 @@ void ToneModule2006::render(Buses& buses) {
         accel::svf_le_lanes(bt.rows[0].data(), kBlock, lp.data(), bp.data(), f.data(), df.data(), q.data(), nb, kBlock);
         for (std::size_t i = 0; i < nb; ++i) {
             Obj& o = *bt.obj[i];
-            o.dsp.render_end(tables_, bt.controls[i], bt.out[i], bt.rows[i].data());
+            o.dsp.render_end(bt.out[i], bt.rows[i].data());
             if (o.dying && !o.dsp.active()) o.busy = o.dying = false;
         }
         nb = 0;
@@ -1103,7 +1145,7 @@ void ToneModule2006::render(Buses& buses) {
         // A portamento time change re-reads the glide rate of the part's voices (event 0x17,
         o.dsp.set_portamento_rate(tables_, 127 - s.part->ram->portamento_time);
         bt.controls[nb] = controls(s);
-        if (!o.dsp.render_begin(tables_, bt.controls[nb], ctx_.interpolation, bt.rows[nb].data(), bt.svf[nb])) {
+        if (!o.dsp.begin(tables_)) {
             if (o.dying && !o.dsp.active()) o.busy = o.dying = false;
             continue;
         }

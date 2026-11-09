@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <span>
 
+#include "accel/control_le.hpp"
 #include "steal_fade.hpp"
 #include "eq.hpp"
 #include "hvyxg/types.hpp"
@@ -117,10 +118,29 @@ public:
         float* bp = nullptr;
         float f = 0.0f, df = 0.0f, q = 1.0f;
     };
-    /// A tick in three steps, as render() does them: control, the samples into x and the peak (false:
-    /// nothing to render); the filter over x, by the caller (svf); then EQ, fade and the outputs.
-    bool render_begin(RateTables& t, const VoiceControls& c, Interpolation interp, float* x, SvfStep& svf);
-    void render_end(RateTables& t, const VoiceControls& c, std::array<float*, kOutputs> out, float* x);
+    /// A tick in steps, as render() does them (docs/ACCELERATION.md, "Control across voices"):
+    /// begin -- the pending note-off, the start gate and key-on delay, an S&H LFO's draw from the
+    /// shared generator (false: nothing to render this block); control -- LFO, EGs, pitch, filter,
+    /// the output glides and gain ramps (no shared state: a caller may run a batch's together);
+    /// signal -- the samples into x and the peak, and the filter's step; the filter over x, by the
+    /// caller (svf); then EQ, fade and the outputs.
+    bool begin(RateTables& t);
+    void control(RateTables& t, const VoiceControls& c);
+    void signal(Interpolation interp, const RateTables& t, float* x, SvfStep& svf);
+    void render_end(std::array<float*, kOutputs> out, float* x);
+    /// control() across a batch (accel/control_le.hpp): this voice's state and the block's controls
+    /// into lane i (ok[i] = 0 where the voice is outside the states a kernel takes), and back from it.
+    void to_lanes(accel::LanesLE& L, std::size_t i, const RateTables& t, const VoiceControls& c) const;
+    void from_lanes(const accel::LanesLE& L, std::size_t i, const VoiceControls& c);
+    static accel::ControlTablesLE control_tables(const RateTables& t);
+    static const accel::FieldsLE& fields_le();
+#if defined(HVYXG_CHECK_CONTROL)
+    /// Debugging a control kernel: the fields control() writes that differ from `ref`'s, printed; true
+    /// if any did.
+    bool differs_from(const DspVoice& ref, const char* where) const;
+#endif
+    /// The LFO waves that sample and hold a random value.
+    static bool sh_wave(int w) { return w == 3 || w == 8 || w == 12; }
 
     bool active() const { return state_ != State::Idle; }
     /// Silence the voice at once, keeping its object state (LFO phase) for the next note.
@@ -265,6 +285,11 @@ private:
     Lfo lfo_;
     std::array<float, kOutputs> gain_prev_{};
     bool mixed_ = false;
+    /// The block's start gate (begin), the filter coefficient at its end and the mix ramps' ends
+    /// per output (control).
+    bool gated_ = false;
+    float f_new_ = 0.0f;
+    std::array<float, kOutputs> mix_from_{}, mix_to_{};
 };
 
 } // namespace hvyxg::syxg2006le

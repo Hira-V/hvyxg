@@ -5,6 +5,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
+#if defined(HVYXG_CHECK_CONTROL)
+#include <cstdio>
+#endif
 
 #include "syxg2006le/tbl/dll_tables.hpp"
 #include "syxg2006le/tbl/param_blocks.hpp"
@@ -765,21 +769,30 @@ float DspVoice::filter_coefficient(const RateTables& t, std::int32_t cutoff, int
     return std::min(1.0f, static_cast<float>(256 + ((lc >> 8) & 255)) / std::ldexp(1.0f, 24 - (lc >> 16)));
 }
 
-bool DspVoice::render_begin(RateTables& t, const VoiceControls& c, Interpolation interp, float* x, SvfStep& svf) {
+bool DspVoice::begin(RateTables& t) {
     apply_note_off(t);
     if (state_ == State::Idle) return false;
     // 30 ms start gate.
-    const bool gated = !step_up(gate_, t.gate_samples, kBlock);
+    gated_ = !step_up(gate_, t.gate_samples, kBlock);
     if (state_ == State::Delay) {
-        if (!(step_up(delay_counter_, delay_target_, kBlock) && !gated)) return false;
+        if (!(step_up(delay_counter_, delay_target_, kBlock) && !gated_)) return false;
         state_ = State::Running;
     }
     started_ = true;
+    // An S&H LFO's draw from the shared generator, here rather than in lfo_tick: the same place in
+    // the draws' order (nothing draws between), and control() then touches no shared state.
+    if (sh_wave(lfo_.wave) && lfo_.sh_flag) {
+        lfo_.sh = static_cast<float>(t.random());
+        lfo_.sh_flag = false;
+    }
+    return true;
+}
 
-    lfo_tick(t, c, gated);
+void DspVoice::control(RateTables& t, const VoiceControls& c) {
+    lfo_tick(t, c, gated_);
 
     // Pitch: once per block, before rendering.
-    mod_tick(peg_, gated);
+    mod_tick(peg_, gated_);
     pitch_base_ = cents_to_log(c.pitch_cents);
     step(porta_pos_, 0, porta_step_);
     std::int32_t b = std::clamp<std::int32_t>(pitch_base_ + porta_pos_, -0x80000, 0x80000) + peg_.pos + lfo_.out_pitch +
@@ -789,38 +802,16 @@ bool DspVoice::render_begin(RateTables& t, const VoiceControls& c, Interpolation
     inc_ = static_cast<std::int32_t>(std::ldexp(t.pitch[static_cast<std::size_t>(v & 0x3FF)], (v >> 10) + 15));
 
     // Filter EG → filter.
-    mod_tick(feg_, gated);
+    mod_tick(feg_, gated_);
     cutoff_target_ = cents_to_log(c.cutoff_cents) + t.cutoff_base;
     step(cutoff_cur_, cutoff_target_, t.inc_decay[kCutoffGlideRate]);
-    const float f = filter_coefficient(t, cutoff_cur_ + feg_.pos, c.resonance);
+    f_new_ = filter_coefficient(t, cutoff_cur_ + feg_.pos, c.resonance);
     q_ = filter_type_ == 6 || filter_type_ == 7
              ? 2.0f
              : static_cast<float>(syxg2006le::tbl::filter_damping(c.resonance));
-    if (f_prev_ < 0.0f) f_prev_ = f;
+    if (f_prev_ < 0.0f) f_prev_ = f_new_;
 
     amp_tick(t);
-
-    // Samples, then (by the caller, across a batch of voices) the filter.
-    render_samples(std::span<float, kBlock>(x, kBlock), interp, t);
-    // the peak of |EG gain × sample| over the block (gain ramped from the
-    // previous block's value), in full-scale units; read by the steal score.
-    {
-        constexpr float k = 1.0f / 32768.0f;
-        const float a = eg_.gain_prev * k;
-        accel::peak_ramp(x, a, (eg_.gain * k - a) * (1.0f / kBlock), &peak_, kBlock);
-    }
-    svf.lp = &svf_.lp;
-    svf.bp = &svf_.bp;
-    svf.f = f_prev_;
-    svf.df = (f - f_prev_) / kBlock;
-    svf.q = q_;
-    f_prev_ = f;
-    return true;
-}
-
-void DspVoice::render_end(RateTables& t, const VoiceControls& c, std::array<float*, kOutputs> out, float* x) {
-    eq.process(x, kBlock);
-    const bool faded = steal_fade_.apply(x, kBlock);
 
     // Output stage: glide level / pan / sends, then the per-output gains
     // g(pan + send + level + amp LFO); outputs whose send + level + LFO reach 255 units are
@@ -841,20 +832,229 @@ void DspVoice::render_end(RateTables& t, const VoiceControls& c, std::array<floa
         default: gain[5] = gl; gain[6] = gr; break;
         }
     }
-
     // Mix: EG × gain ramps linearly from the previous block's end value. Bus
     // scale: the DLL's dry-bus → output factor −2^-13 (samples in 16-bit units).
     constexpr float kBusScale = -1.0f / 8192.0f;
     if (!mixed_) gain_prev_ = gain; // the first block starts at its own output gains
     mixed_ = true;
+    for (std::size_t o = 0; o < kOutputs; ++o) {
+        mix_from_[o] = eg_.gain_prev * gain_prev_[o] * kBusScale;
+        mix_to_[o] = eg_.gain * gain[o] * kBusScale;
+    }
+    gain_prev_ = gain;
+}
+
+static_assert(accel::kBlockLE == kBlock);
+
+#if defined(HVYXG_CHECK_CONTROL)
+bool DspVoice::differs_from(const DspVoice& r, const char* where) const {
+    bool bad = false;
+    const auto chk = [&](const char* name, double a, double b) {
+        if (a != b && !(a != a && b != b)) {
+            std::fprintf(stderr, "%s: %s kernel %.9g reference %.9g\n", where, name, a, b);
+            bad = true;
+        }
+    };
+    chk("lfo.phase", lfo_.phase, r.lfo_.phase);
+    chk("lfo.amod", lfo_.amod, r.lfo_.amod);
+    chk("lfo.sh_flag", lfo_.sh_flag, r.lfo_.sh_flag);
+    chk("lfo.out_pitch", lfo_.out_pitch, r.lfo_.out_pitch);
+    chk("lfo.out_amp", lfo_.out_amp, r.lfo_.out_amp);
+    chk("lfo.out_filter", lfo_.out_filter, r.lfo_.out_filter);
+    chk("lfo.out_bias", lfo_.out_bias, r.lfo_.out_bias);
+    for (int g = 0; g < 2; ++g) {
+        const ModEg& a = g ? feg_ : peg_;
+        const ModEg& b = g ? r.feg_ : r.peg_;
+        chk(g ? "feg.state" : "peg.state", a.state, b.state);
+        chk(g ? "feg.pos" : "peg.pos", a.pos, b.pos);
+        chk(g ? "feg.delay" : "peg.delay", a.delay, b.delay);
+    }
+    chk("pitch_base", pitch_base_, r.pitch_base_);
+    chk("porta_pos", porta_pos_, r.porta_pos_);
+    chk("inc", inc_, r.inc_);
+    chk("cutoff_target", cutoff_target_, r.cutoff_target_);
+    chk("cutoff_cur", cutoff_cur_, r.cutoff_cur_);
+    chk("f_new", f_new_, r.f_new_);
+    chk("f_prev", f_prev_, r.f_prev_);
+    chk("q", q_, r.q_);
+    chk("amp.state", eg_.state, r.eg_.state);
+    chk("amp.x", eg_.x, r.eg_.x);
+    chk("amp.hold", eg_.hold, r.eg_.hold);
+    chk("amp.gain_prev", eg_.gain_prev, r.eg_.gain_prev);
+    chk("amp.gain", eg_.gain, r.eg_.gain);
+    chk("amp.finished", eg_.finished, r.eg_.finished);
+    chk("stage_ticks", stage_ticks_, r.stage_ticks_);
+    chk("peak_timer", peak_timer_, r.peak_timer_);
+    chk("peak", peak_, r.peak_);
+    chk("level_x", level_x_, r.level_x_);
+    chk("pan_x0", pan_x_[0], r.pan_x_[0]);
+    chk("pan_x1", pan_x_[1], r.pan_x_[1]);
+    for (std::size_t j = 0; j < 4; ++j) chk("send_x", send_x_[j], r.send_x_[j]);
+    chk("mixed", mixed_, r.mixed_);
+    for (std::size_t o = 0; o < kOutputs; ++o) {
+        chk("gain_prev", gain_prev_[o], r.gain_prev_[o]);
+        chk("mix_from", mix_from_[o], r.mix_from_[o]);
+        chk("mix_to", mix_to_[o], r.mix_to_[o]);
+    }
+    if (bad)
+        std::fprintf(stderr, "%s: lfo wave %d state %d, amp state %d, peg %d feg %d, gated %d\n", where, lfo_.wave, lfo_.state,
+                     r.eg_.state, peg_.state, feg_.state, gated_);
+    return bad;
+}
+#endif
+
+accel::ControlTablesLE DspVoice::control_tables(const RateTables& t) {
+    return {t.pitch.data(), t.inc_decay[kCutoffGlideRate], t.inc_decay[kSustainGlideRate], t.inc_pan, t.inc_send};
+}
+
+// The kernel reaches the voices' fields by offset (DspVoice is not standard-layout, but has no virtual
+// bases: GCC and Clang give offsetof its plain meaning).
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Winvalid-offsetof"
+const accel::FieldsLE& DspVoice::fields_le() {
+    static const accel::FieldsLE f = [] {
+        accel::FieldsLE r{};
+        const auto at = [](std::size_t o) { return static_cast<std::uint32_t>(o); };
+        constexpr std::size_t lfo = offsetof(DspVoice, lfo_), amp = offsetof(DspVoice, eg_);
+        r.lfo_wave = at(lfo + offsetof(Lfo, wave));
+        r.lfo_invert = at(lfo + offsetof(Lfo, invert));
+        r.lfo_phase = at(lfo + offsetof(Lfo, phase));
+        r.lfo_inc = at(lfo + offsetof(Lfo, inc));
+        r.lfo_pitch_depth = at(lfo + offsetof(Lfo, pitch_depth));
+        r.lfo_amp_depth = at(lfo + offsetof(Lfo, amp_depth));
+        r.lfo_filter_depth = at(lfo + offsetof(Lfo, filter_depth));
+        r.lfo_amod = at(lfo + offsetof(Lfo, amod));
+        r.lfo_sh = at(lfo + offsetof(Lfo, sh));
+        r.out_pitch = at(lfo + offsetof(Lfo, out_pitch));
+        r.out_amp = at(lfo + offsetof(Lfo, out_amp));
+        r.out_filter = at(lfo + offsetof(Lfo, out_filter));
+        r.out_bias = at(lfo + offsetof(Lfo, out_bias));
+        for (std::size_t g = 0; g < 2; ++g) {
+            const std::size_t e = g == 0 ? offsetof(DspVoice, peg_) : offsetof(DspVoice, feg_);
+            auto& d = r.eg[g];
+            d.state = at(e + offsetof(ModEg, state));
+            d.pos = at(e + offsetof(ModEg, pos));
+            d.inc0 = at(e + offsetof(ModEg, inc));
+            d.inc1 = d.inc0 + 4;
+            d.inc2 = d.inc0 + 8;
+            d.inc_sustain = at(e + offsetof(ModEg, inc_sustain));
+            d.inc_release = at(e + offsetof(ModEg, inc_release));
+            d.level1 = at(e + offsetof(ModEg, level)) + 4;
+            d.level2 = d.level1 + 4;
+            d.level3 = d.level1 + 8;
+            d.release_level = at(e + offsetof(ModEg, release_level));
+            d.delay = at(e + offsetof(ModEg, delay));
+            d.delay_target = at(e + offsetof(ModEg, delay_target));
+        }
+        r.porta_pos = at(offsetof(DspVoice, porta_pos_));
+        r.porta_step = at(offsetof(DspVoice, porta_step_));
+        r.pos_hi = at(offsetof(DspVoice, pos_)) + 4;       // little-endian: the high word
+        r.loop_tune = at(offsetof(DspVoice, loop_tune_));
+        r.inc = at(offsetof(DspVoice, inc_));
+        r.pitch_base = at(offsetof(DspVoice, pitch_base_));
+        r.cutoff_cur = at(offsetof(DspVoice, cutoff_cur_));
+        r.cutoff_target = at(offsetof(DspVoice, cutoff_target_));
+        r.f_prev = at(offsetof(DspVoice, f_prev_));
+        r.f_new = at(offsetof(DspVoice, f_new_));
+        r.amp_state = at(amp + offsetof(AmpEg, state));
+        r.amp_x = at(amp + offsetof(AmpEg, x));
+        r.amp_hold = at(amp + offsetof(AmpEg, hold));
+        r.amp_xstep = at(amp + offsetof(AmpEg, xstep));
+        r.amp_inc1 = at(amp + offsetof(AmpEg, inc)) + 4;
+        r.amp_inc2 = r.amp_inc1 + 4;
+        r.amp_inc3 = r.amp_inc1 + 8;
+        r.amp_inc_release = at(amp + offsetof(AmpEg, inc_release));
+        r.amp_level1 = at(amp + offsetof(AmpEg, level)) + 4;
+        r.amp_level2 = r.amp_level1 + 4;
+        r.amp_level3 = r.amp_level1 + 8;
+        r.amp_decay1_rate = at(amp + offsetof(AmpEg, decay1_rate));
+        r.amp_decay2_rate = at(amp + offsetof(AmpEg, decay2_rate));
+        r.amp_gain_prev = at(amp + offsetof(AmpEg, gain_prev));
+        r.amp_gain = at(amp + offsetof(AmpEg, gain));
+        r.amp_slope = at(amp + offsetof(AmpEg, slope));
+        r.amp_intercept = at(amp + offsetof(AmpEg, intercept));
+        r.stage_ticks = at(offsetof(DspVoice, stage_ticks_));
+        r.peak_timer = at(offsetof(DspVoice, peak_timer_));
+        r.level_x = at(offsetof(DspVoice, level_x_));
+        for (std::size_t j = 0; j < 2; ++j) r.pan_x[j] = at(offsetof(DspVoice, pan_x_)) + 4 * static_cast<std::uint32_t>(j);
+        for (std::size_t j = 0; j < 4; ++j) r.send_x[j] = at(offsetof(DspVoice, send_x_)) + 4 * static_cast<std::uint32_t>(j);
+        for (std::size_t o = 0; o < kOutputs; ++o) {
+            r.gain_prev[o] = at(offsetof(DspVoice, gain_prev_)) + 4 * static_cast<std::uint32_t>(o);
+            r.mix_from[o] = at(offsetof(DspVoice, mix_from_)) + 4 * static_cast<std::uint32_t>(o);
+            r.mix_to[o] = at(offsetof(DspVoice, mix_to_)) + 4 * static_cast<std::uint32_t>(o);
+        }
+        return r;
+    }();
+    return f;
+}
+#pragma GCC diagnostic pop
+// The fields the kernel reads as 32-bit words are 32-bit (FieldsLE).
+static_assert(sizeof(int) == 4 && sizeof(float) == 4 && sizeof(std::int64_t) == 8);
+
+void DspVoice::to_lanes(accel::LanesLE& L, std::size_t i, const RateTables& t, const VoiceControls& c) const {
+    const auto& l = lfo_;
+    const auto& e = eg_;
+    const bool sine = !(l.wave >= 0 && l.wave <= 12) || l.wave == 4;
+    L.voice[i] = static_cast<std::uint32_t>(reinterpret_cast<const std::uint8_t*>(this) - L.base);
+    L.ok[i] = l.state == 2 && !sine && !(e.state == 0 && e.attack_rate == 127) && !((e.state == 1 || e.state == 9) && e.recompute);
+    L.gated[i] = gated_;
+    L.pitch_base[i] = cents_to_log(c.pitch_cents);
+    L.cutoff_target[i] = cents_to_log(c.cutoff_cents) + t.cutoff_base;
+    static constexpr std::array<int, 10> kTypeClass = {0, 1, 2, 2, 2, 1, 3, 3, 0, 2};
+    L.ceiling[i] = filter_type_ >= 0 && filter_type_ < 10
+                       ? std::int32_t{t.tb.kFilterCeiling[static_cast<std::size_t>(kTypeClass[static_cast<std::size_t>(filter_type_)])]
+                                                         [static_cast<std::size_t>(std::clamp(c.resonance, 0, 255))]}
+                             << 8
+                       : 0xFFF;
+    L.amod_target[i] = static_cast<float>(c.amod << 12);
+    L.pmod[i] = lfo_cents(c.pmod);
+    L.fmod[i] = lfo_cents(c.fmod);
+    L.level_t[i] = c.level << 12;
+    L.pan_t[0][i] = c.pan_l << 12;
+    L.pan_t[1][i] = c.pan_r << 12;
+    for (std::size_t j = 0; j < 4; ++j) L.send_t[j][i] = std::min(c.send[j], 255) << 12;
+    L.amp_inc_attack[i] = std::max<std::int32_t>(static_cast<std::int32_t>(static_cast<std::int64_t>(e.inc[0]) * 128 / 255), 1);
+    L.sh_flag[i] = l.sh_flag;
+    L.mixed[i] = mixed_;
+}
+
+void DspVoice::from_lanes(const accel::LanesLE& L, std::size_t i, const VoiceControls& c) {
+    // (the kernel wrote the rest in place)
+    lfo_.sh_flag = L.sh_flag[i] != 0;
+    mixed_ = true;
+    if (L.finished[i]) eg_.finished = true;
+    if (L.peak_reset[i]) peak_ = 0.0f;
+    q_ = filter_type_ == 6 || filter_type_ == 7 ? 2.0f : static_cast<float>(syxg2006le::tbl::filter_damping(c.resonance));
+}
+
+void DspVoice::signal(Interpolation interp, const RateTables& t, float* x, SvfStep& svf) {
+    // Samples, then (by the caller, across a batch of voices) the filter.
+    render_samples(std::span<float, kBlock>(x, kBlock), interp, t);
+    // the peak of |EG gain × sample| over the block (gain ramped from the
+    // previous block's value), in full-scale units; read by the steal score.
+    {
+        constexpr float k = 1.0f / 32768.0f;
+        const float a = eg_.gain_prev * k;
+        accel::peak_ramp(x, a, (eg_.gain * k - a) * (1.0f / kBlock), &peak_, kBlock);
+    }
+    svf.lp = &svf_.lp;
+    svf.bp = &svf_.bp;
+    svf.f = f_prev_;
+    svf.df = (f_new_ - f_prev_) / kBlock;
+    svf.q = q_;
+    f_prev_ = f_new_;
+}
+
+void DspVoice::render_end(std::array<float*, kOutputs> out, float* x) {
+    eq.process(x, kBlock);
+    const bool faded = steal_fade_.apply(x, kBlock);
     // The outputs that receive anything, mixed in one pass (their ramps are independent add
     // chains, which then overlap; the same operations per output as one loop each).
     std::array<float*, kOutputs> bus{};
     std::array<float, kOutputs> ga{}, gd{};
     std::size_t k = 0;
     for (std::size_t o = 0; o < kOutputs; ++o) {
-        const float a = eg_.gain_prev * gain_prev_[o] * kBusScale;
-        const float target = eg_.gain * gain[o] * kBusScale;
+        const float a = mix_from_[o], target = mix_to_[o];
         if (out[o] && (a != 0.0f || target != 0.0f)) {
             bus[k] = out[o];
             ga[k] = a;
@@ -862,7 +1062,6 @@ void DspVoice::render_end(RateTables& t, const VoiceControls& c, std::array<floa
         }
     }
     accel::mix_ramps(x, bus.data(), ga.data(), gd.data(), k, kBlock);
-    gain_prev_ = gain;
 
     if (eg_.finished || sample_ended_ || faded) {
         state_ = State::Idle;
@@ -874,10 +1073,12 @@ void DspVoice::render_end(RateTables& t, const VoiceControls& c, std::array<floa
 void DspVoice::render(RateTables& t, const VoiceControls& c, std::array<float*, kOutputs> out, Interpolation interp) {
     std::array<float, kBlock> x{};
     SvfStep svf;
-    if (!render_begin(t, c, interp, x.data(), svf)) return;
+    if (!begin(t)) return;
+    control(t, c);
+    signal(interp, t, x.data(), svf);
     float* xp = x.data();
     accel::svf_le_lanes(xp, kBlock, &svf.lp, &svf.bp, &svf.f, &svf.df, &svf.q, 1, kBlock);
-    render_end(t, c, out, xp);
+    render_end(out, xp);
 }
 
 int DspVoice::score_state() const {

@@ -83,6 +83,12 @@ target_include_directories(hvyxg PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE
                            PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
 target_compile_features(hvyxg PUBLIC cxx_std_20)
 target_compile_options(hvyxg PRIVATE ${HVYXG_WARNINGS})
+# No FMA contraction anywhere: the engines' floating point is the same on every machine (an x86-64
+# build has no FMA to contract to, a RISC-V or ARM one does), which the accelerated kernels are checked
+# against bit for bit (docs/ACCELERATION.md) -- and the DLLs' x87 code never fused either.
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+  target_compile_options(hvyxg PRIVATE -ffp-contract=off)
+endif()
 # The MU ROM converter must reproduce SXG-Create-NF's (Python) floating point exactly: no FMA
 # contraction there (THIRD_PARTY.md, "SXG-Create-NF").
 file(GLOB HVYXG_MU_ROM_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/syxg50/mu_rom/*.cpp)
@@ -102,7 +108,7 @@ if(HVYXG_BUILD_CORE_CHECK AND CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
   target_include_directories(hvyxg_core_check PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_BINARY_DIR}/generated
                              ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
   target_compile_definitions(hvyxg_core_check PRIVATE HVYXG_NO_FILES=1)
-  target_compile_options(hvyxg_core_check PRIVATE ${HVYXG_WARNINGS} -fno-exceptions -fno-rtti)
+  target_compile_options(hvyxg_core_check PRIVATE ${HVYXG_WARNINGS} -fno-exceptions -fno-rtti -ffp-contract=off)
   set_source_files_properties(${HVYXG_MU_ROM_SOURCES} TARGET_DIRECTORY hvyxg_core_check PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
   # Linked alone, so a core source that needs a hosted one fails here.
   add_executable(hvyxg_core_link tests/core/core_link.cpp)

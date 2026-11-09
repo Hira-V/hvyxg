@@ -180,6 +180,10 @@ private:
         std::array<DspVoice::SvfStep, accel::kBatch> svf{};
         std::array<VoiceControls, accel::kBatch> controls{};
         std::array<std::array<float*, DspVoice::kOutputs>, accel::kBatch> out{};
+        accel::LanesLE lanes{};      // the batch's control, where a target has a kernel for it
+#if defined(HVYXG_CHECK_CONTROL)
+        std::array<DspVoice, accel::kBatch> check{};   // the voices before the kernel, for the reference
+#endif
     };
     std::unique_ptr<Batch> batch_ = std::make_unique<Batch>();
     std::size_t cursor_ = 0;

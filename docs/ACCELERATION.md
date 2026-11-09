@@ -72,6 +72,83 @@ Effects (reverb, chorus, variation, insertion) stay f32 and scalar in the first 
 they are a few percent of the voices' cost (PERFORMANCE.md, "Effects"). They get kernels later only if
 profiles say so.
 
+## Control across voices
+
+**Measured (2026-11-09, the Blackhole, 128 voices, linear, kernels skipped in turn):** with the signal on
+the vector unit, a voice's time is mostly its scalar control code -- the S-YXG2006LE 0.114 % of a core
+of 0.164 % (70 %), the S-YXG50 0.033 % of 0.067 % (50 %). The X280 runs it at about three times the
+cycles a Zen 4 core takes (in order, dual issue); no one function dominates (LFO, three EGs, pitch,
+cutoff, the output glides and gains, each a few hundred cycles), so the fix is the vector unit, across
+voices, as the filter already runs.
+
+**The shape.** A block's voices go in batches (`kBatch`, as today), each in three passes:
+
+1. **Gather** (scalar, per voice, in voice order): what is branchy or touches shared state -- the
+   pending note-off, the start gate and key-on delay, the voice's draws from the shared random generator
+   (the per-voice draw, and an S&H LFO's draw, taken here in the same order as before), the part's
+   controls (`controls()`, its sums shared per part) -- then the voice's per-block state copied into
+   the batch's **control lanes**: one array per field (structure of arrays), lane = voice.
+2. **Control** (a kernel across the lanes): LFO, the EGs, pitch → phase increment, cutoff glide →
+   filter coefficient and damping, the output stage's glides and the per-output gain ramps. Its results
+   go back to the voices (scatter), and the signal passes read them as today.
+3. **Signal** (as today): samples and peak per voice, the filter across the batch, EQ, fade and the mix
+   per voice.
+
+**Exact by construction.** The reference is the engines' own per-voice code, unchanged: a build
+without a target's control kernel runs it voice by voice, bit for bit as today. A target's kernel takes
+the steady states (an EG stepping toward its target, the LFO running, the glides) with the reference's
+operations in the reference's order; any lane that would leave them this block -- an EG reaching a
+stage end, a recompute, an LFO delay or fade, a wave the kernel does not do -- is flagged, not
+written, and runs the reference code on its untouched voice. The lanes are a copy, so a flagged lane
+costs its gather and nothing else. The one inexact step allowed (docs: speed over exactness) is a
+vector sine for the 2006LE's sine LFO; the reference's `std::sin` stays the reference.
+
+**Shared between the engines** (`src/accel/control*.hpp`): the step toward a target with its done mask
+(the 2006LE's `step`, the S-YXG50's `glide`: the same shape, a different landing rule), the attenuation
+→ gain (`mant / (131071 · 2^octave)`, both engines' `lin` / `eg_gain`), the gain-ramp builder (start,
+step and the "receives anything" mask per output), and the scalar fallback plumbing. Each engine keeps
+its own lanes and kernel; what differs is the EGs' stages and the LFOs.
+
+**Per target.**
+
+- **X280 (RVV 1.0, VLEN 512):** e32 at m1 is 16 lanes, so a 32-voice batch is two groups; the 2006LE's
+  x87-double products at e64 m2. Tables (pitch mantissas, filter ceilings) by indexed loads. The
+  scalar core reads the results once per batch (a scalar read waits for the vector queue to drain, so
+  once, not per voice).
+- **C920 (RVV 0.7.1, VLEN 128):** the same source: 4 lanes at e32 m1, so m4 for 16; no fractional
+  LMUL is needed (control is all 32- and 64-bit); e64 for the doubles. Its vector unit sits in the
+  out-of-order core, so the scalar read-back costs less than on the X280.
+- **A25 (Andes DSP, RV32, no vector unit):** the lanes run the reference code in a lane loop -- no
+  SIMD gain for 32-bit control, but straight-line, cache-friendly passes. Its gain comes with the
+  integer forms (i32 / i16): gains from a 256-entry mantissa table and a shift instead of a float
+  division, packed 16-bit gains (`smmwb`, `kmda`) in the mix.
+
+**Built so far (2026-11-09), the 2006LE:** the voice's block split into begin / control / signal /
+end, the batch's control through `accel::control_le` (`src/accel/control_le*.{hpp,cpp}`), reading and
+writing the voices' fields in place by indexed loads and stores (offsets from `DspVoice::fields_le`), the
+lanes carrying only the block's inputs and the byte flags. Checked lane by lane against the reference
+(`HVYXG_CHECK_CONTROL`, a RISC-V build under qemu at VLEN 512: 0 differences in 8 songs; the kernel keeps
+84-99.7 % of lanes) and on the Blackhole (6 song digests identical to the reference build). hvyxg is now
+built without FMA contraction everywhere, so the reference is the same on every machine.
+
+**What it bought, and why so little:** a voice 0.153 % → 0.146 % of an X280 core (128 voices, linear).
+The full profile (every perf sample, not the top 24) of control alone says why: the kernel itself costs
+about half the scalar code it replaces, but most of that is its indexed loads and stores (about one
+element a cycle on the X280: some 150 fields a voice), and the rest of control -- the module's voice
+loop, `controls()`, `begin`, filling the lanes -- is scalar and now the larger part, and it waits for
+each batch's kernel rather than overlapping it.
+
+**Next: the voices' state in lanes for good.** The per-block state lives in structure-of-arrays form in
+the module (one array per field, indexed by voice object), DspVoice reaching its fields there: the
+kernel then reads and writes unit-stride (16 lanes in a couple of cycles, not 16), over all objects at
+once with the inactive masked, and nothing is filled or copied. Then `controls()` and `begin` in the
+same lanes, so the scalar side is the events alone. The same for the S-YXG50's ChipVoice.
+
+**Order of work:** the 2006LE (the larger share) -- gather / control / scatter with the reference
+voice by voice, bit for bit; then its RVV kernel, checked lane by lane against the reference
+(`tools/accel_check.cpp`: random voice states, every field after a block); then the S-YXG50 the same
+way; then the C920 and the A25.
+
 ## Numeric forms
 
 | Form | Samples | Coefficients, gains | Buses | For |
