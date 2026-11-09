@@ -1,0 +1,187 @@
+// Copyright (C) 2026 Kevin H. Patterson
+// SPDX-License-Identifier: BSD-3-Clause (see LICENSE)
+#pragma once
+// The S-YXG50 "chip": an AWM2-style voice renderer driven by register values, as the DLL's
+// chip layer does it (per voice and 128-sample block: → LFO, pitch
+// cutoff, AEG, levels, fetch
+// filter + mix).
+//
+// Units: attenuation 0x10000 per octave (6.02 dB); envelope / level registers 0x1000 per
+// unit (1/16 octave); cutoff 256 per octave (12 bit, chip C = reg + 0x800).
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <span>
+
+#include "steal_fade.hpp"
+#include "hvyxg/types.hpp"
+#include "buses.hpp"
+#include "eq.hpp"
+#include "syxg50/bank_data.hpp"
+#include "syxg50/dll_tables.hpp"
+
+namespace hvyxg::syxg50 {
+
+inline constexpr std::size_t kBlock = 128;
+/// Attenuation at or above which a gain is 0.
+inline constexpr std::int32_t kAttenOff = 0xfffff;
+
+/// `lin(x)`: gain of attenuation `x`, linear within each octave.
+inline float lin(std::int32_t x) {
+    if (x < 0) return 1.0f;
+    if (x >= kAttenOff) return 0.0f;
+    const auto mant = static_cast<float>((~x & 0xffff) | 0x10000);
+    return mant / (static_cast<float>(1 << (x >> 16)) * 131071.0f);
+}
+
+/// The inverse of `lin`.
+std::int32_t inv_lin(float gain);
+
+/// Rate tables for one output rate:
+/// `2^26/TA[r]`, `2^27/TB[r]`, `2^27/TC[r]`, each × 44100/fs, truncated.
+struct RateTables {
+    std::array<std::int32_t, 128> attack{};
+    std::array<std::int32_t, 128> decay{};
+    std::array<std::int32_t, 128> release{};
+    /// Cutoff C units → SVF coefficient scale for the output rate (see `svf_f`).
+    float rate_ratio = 1.0f;
+    float sample_rate = 44100.0f;
+
+    RateTables(const dll::Tables& tb, float sample_rate);
+};
+
+/// One chip voice. The control layer writes the `set_*` registers; `render` runs one block.
+class ChipVoice {
+public:
+    // ── registers ────────────────────────────────────────────────────────────────────
+    /// Key-on: wave + all registers below must be set first.
+    void start(const RateTables& rt);
+    void set_wave(std::span<const std::uint8_t> wave, const WaveRef& w, std::uint32_t skip);
+    /// Reg 0x680 from the control layer's pitch sum in cents:
+    /// octave + 12-bit mantissa `round(2048·2^(-i/1200))`, scaled by 44100/fs. `cap3` = zone
+    /// format bits 6-7 both set (octave capped at 3 instead of 7).
+    void set_pitch(int cents, bool cap3 = false);
+    /// Reg 0x400: cutoff (0 or 0x001..0x7ff, chip adds 0x800) and resonance 0..31.
+    void set_filter(int cutoff11, int resonance5);
+    /// Reg 0x440: cutoff glide rate (index into the decay table, 0x7f = fastest).
+    void set_cutoff_glide(int rate) { cut_glide_rate_ = rate & 0x7f; }
+    /// Reg 0x441 / 0x480 / 0x481: AMD (0..31), FMD (0..7), LFO speed (0..63), triangle wave,
+    /// PMD (0..255).
+    void set_lfo(int amd, int fmd, int speed, bool triangle, int pmd);
+    /// Regs 0x4c0/0x4c1: attack (bit 7 = attack from `init_level`, else hold) and initial
+    /// level (attenuation units of 0x1000).
+    void set_attack(int reg4c0, int reg4c1) { reg4c0_ = reg4c0; reg4c1_ = reg4c1; }
+    /// Regs 0x500/0x501: decay (bit 7 = release table) rate and target level. Takes effect at
+    /// once.
+    void set_decay(int reg500, int reg501);
+    /// Regs 0x5c0 / 0x5c1 / 0x541 / 0x540 / 0x580 / 0x581: level, pan (L/R nibbles), dry,
+    /// reverb, chorus, variation attenuation (0xff = off). Levels and pan glide.
+    void set_levels(int level, int pan_l, int pan_r, int dry, int reverb, int chorus,
+                    int variation);
+
+    // ── state ────────────────────────────────────────────────────────────────────────
+    bool active() const { return active_; }
+    void stop() { active_ = false; }
+    /// Superset: fade the sound out linearly over `samples` (a stolen voice), then end.
+    void start_steal_fade(std::uint32_t samples) { steal_fade_.start(samples); }
+    /// The AEG reached its decay target (chip status bit 0x40 clear) in a decay state.
+    bool decay_reached() const { return (state_ == 3 || state_ == 4) && reached_; }
+    /// Current envelope amplitude (end of last block).
+    float envelope() const { return env_; }
+    int aeg_state() const { return state_; }
+    /// Current envelope attenuation (0x10000 per octave).
+    std::int32_t attenuation() const { return x_; }
+    /// The AEG status byte the control layer's AEG monitor reads: 0xff for a voice
+    /// that is not sounding, else the attenuation in 1.5-dB steps (bits 0-5), bit 6 = the
+    /// decay / release target was reached in the last block, bit 7 = decay or release state.
+    int status() const;
+
+    /// Render one block into the buses (adds).
+    void render(Buses& buses, const RateTables& rt, Interpolation interp);
+    /// Render the dry pair into insertion chain `chain` of the buses (−1: the dry bus).
+    void set_chain(int chain) { chain_ = chain; }
+
+    /// The DLL's physical chip voice (0..255) this voice was keyed on, -1 none.
+    int phys = -1;
+
+    /// Superset: the part / drum-note EQ and HPF after the filter, before the outputs
+    /// (eq.hpp; set by the tone module, nothing while flat).
+    eq::VoiceEq eq;
+
+private:
+    void attack_setup(const RateTables& rt);
+    void decay_setup(const RateTables& rt);
+    void aeg_step();
+    void fetch(const RateTables& rt, Interpolation interp, float* out);
+    float sample_at(std::int32_t i) const;
+    float direct(std::int32_t i) const;
+    static void mix_ramps(const float* x, float* const* dst, float* g, const float* dg, std::size_t k);
+    void update_gains(std::int32_t am);
+    float svf_f(std::int32_t v) const;
+
+    bool active_ = false;
+    StealFade steal_fade_;
+    /// Linear release reached: the chip takes no more register writes (flag bit 1 cleared).
+    bool locked_ = false;
+    /// The envelope fell below -48 dB.
+    bool done_ = false;
+    const RateTables* rt_ = nullptr;
+
+    // wave
+    const std::uint8_t* wave_ = nullptr;
+    std::size_t wave_size_ = 0;
+    std::size_t loop_start_ = 0;
+    bool pcm8_ = false;
+    std::int32_t pre_ = 0;
+    std::int32_t loop_len_ = 0;
+    std::uint32_t loop_frac_ = 0; // 32-bit fraction
+    std::int32_t pos_ = 0;
+    std::uint32_t frac_ = 0; // 32-bit fraction
+    bool ended_ = false;
+    /// 17.15 increment before the pitch LFO.
+    std::int32_t inc_ = 0x8000;
+    int pending_cents_ = 0;
+    bool pending_cap3_ = false;
+
+    // LFO
+    std::uint32_t lfo_phase_ = 0;
+    std::int32_t lfo_step_ = 0;
+    bool lfo_tri_ = true;
+    int amd_ = 0, fmd_ = 0, pmd_ = 0;
+    int lfo_speed_ = 0;
+
+    // filter
+    int reg_cut_ = 0, reg_res_ = 0;
+    std::int32_t cut_cur_ = 0, cut_tgt_ = 0;
+    int cut_glide_rate_ = 0x7f;
+    float q_ = 1.0f;
+    float f_prev_ = 0.0f, f_new_ = 0.0f;
+    float band_ = 0.0f, low_ = 0.0f;
+
+    // AEG
+    int reg4c0_ = 0, reg4c1_ = 0, reg500_ = 0, reg501_ = 0;
+    int state_ = 3;
+    std::int32_t x_ = kAttenOff;   // c8
+    std::int32_t hold_ = 0;        // dc
+    std::int32_t init_level_ = 0;  // cc
+    std::int32_t target_ = 0;      // d0
+    std::int32_t step_a_ = 0;      // d4
+    std::int32_t step_d_ = 0;      // d8
+    float env_prev_ = 0.0f, env_ = 0.0f; // e0, e4
+    float slope_ = 0.0f, offset_ = 0.0f; // e8, ec
+    bool reached_ = false;
+
+    // levels (attenuation)
+    std::int32_t level_cur_ = 0, level_tgt_ = 0;
+    std::int32_t pan_l_cur_ = 0, pan_l_tgt_ = 0;
+    std::int32_t pan_r_cur_ = 0, pan_r_tgt_ = 0;
+    std::int32_t dry_ = kAttenOff, rev_ = kAttenOff, cho_ = kAttenOff, var_ = kAttenOff;
+    int chain_ = -1;
+    /// Gains (without the envelope) at the start and end of the block:
+    /// dry L, dry R, reverb, chorus L, chorus R, variation L, variation R.
+    std::array<float, 7> g_prev_{};
+    std::array<float, 7> g_new_{};
+};
+
+} // namespace hvyxg::syxg50

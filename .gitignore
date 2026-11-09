@@ -1,0 +1,22 @@
+/build*/
+.DS_Store
+__pycache__/
+# Yamaha's banks, DLLs and ROMs, anything converted from them, MIDI files and renders are never
+# part of this repository (README.md, "Yamaha's data").
+/_untracked/
+*.tbl
+*.TBL
+*.[Uu][Pp][Cc][Mm]
+*.dll
+*.DLL
+*.bin
+*.BIN
+*.ic[0-9]*
+*.rom
+*.ROM
+*.mid
+*.MID
+*.rmi
+*.wav
+*.mp3
+*.flac
