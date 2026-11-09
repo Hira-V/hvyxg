@@ -178,6 +178,14 @@ and its time is in the resampler's 8-bit gathers and conversion and the filter -
 costs a scalar asin and sin a block (svf_f, remembered while it holds still). The shared RVV helpers are
 `src/accel/lanes_rvv.hpp`.
 
+**The resamplers at LMUL 4 (2026-11-09).** The X280's vector unit is in order: a chunk's work is one
+dependent chain, and its latency, not its operations, set a block's time. At LMUL 4 a block takes half
+the chains (a 2006LE block one): cycles a voice and block (xgkbench), before → after -- S-YXG50 8-bit
+linear 901 → 669, Hermite 1674 → 1500, 16-bit linear 1021 → 888, Hermite 1674 → 1500; 2006LE linear
+424 → 389, Hermite 722 → 662. (LMUL 8 was slower: the registers spill.) The 8-bit linear run also takes
+each lane's pair in one gather of 16-bit words of consecutive bytes. An S-YXG50 voice 0.064 % → 0.051 %
+of a core (128 voices); exact throughout (accel_check, the Blackhole's digests).
+
 **(Superseded) the voices' state in lanes for good.** The per-block state lives in structure-of-arrays form in
 the module (one array per field, indexed by voice object), DspVoice reaching its fields there: the
 kernel then reads and writes unit-stride (16 lanes in a couple of cycles, not 16), over all objects at
