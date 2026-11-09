@@ -1,6 +1,7 @@
 // Copyright (C) 2026 Kevin H. Patterson
 // SPDX-License-Identifier: BSD-3-Clause (see LICENSE)
 #include "syxg50/chip.hpp"
+#include "accel/kernels.hpp"
 
 #include <algorithm>
 #include <climits>
@@ -317,28 +318,6 @@ void ChipVoice::update_gains(std::int32_t am) {
     g_new_[6] = var_ == kAttenOff ? 0.0f : lin(pan_r_cur_ + var_ + lv);
 }
 
-float ChipVoice::direct(std::int32_t i) const {
-    // sample_at for -pre ≤ i < loop_len on a voice that has not ended: the wave covers it.
-    if (pcm8_) return static_cast<float>(static_cast<int>(wave_[loop_start_ + static_cast<std::ptrdiff_t>(i)]) - 0x80) * (1.0f / 128.0f);
-    const std::uint8_t* p = wave_ + loop_start_ + 2 * static_cast<std::ptrdiff_t>(i);
-    return static_cast<float>(static_cast<int>(p[0] | p[1] << 8) - 0x8000) * (1.0f / 32768.0f);
-}
-
-float ChipVoice::sample_at(std::int32_t i) const {
-    if (i < -pre_) i = -pre_;
-    else if (loop_len_ > 0 && i >= loop_len_) i -= loop_len_ * ((i - loop_len_) / loop_len_ + 1);
-    if (pcm8_) {
-        const std::size_t at = loop_start_ + static_cast<std::size_t>(static_cast<std::ptrdiff_t>(i));
-        return at < wave_size_ ? static_cast<float>(static_cast<int>(wave_[at]) - 0x80) * (1.0f / 128.0f)
-                               : 0.0f;
-    }
-    const std::size_t at =
-        loop_start_ + 2 * static_cast<std::size_t>(static_cast<std::ptrdiff_t>(i));
-    if (at + 1 >= wave_size_) return 0.0f;
-    return static_cast<float>(static_cast<int>(wave_[at] | wave_[at + 1] << 8) - 0x8000) *
-           (1.0f / 32768.0f);
-}
-
 void ChipVoice::fetch(const RateTables& rt, Interpolation interp, float* out) {
     // Fetch routines (linear, the DLL), plus a 4-point Hermite option.
     // Pitch: inc += ((PMD · lfo) >> shift) · inc >> 11, once per block.
@@ -351,92 +330,31 @@ void ChipVoice::fetch(const RateTables& rt, Interpolation interp, float* out) {
     const auto inc = static_cast<std::uint64_t>(inc15) << 17;
     const auto inc_int = static_cast<std::int32_t>(inc >> 32);
     const auto inc_frac = static_cast<std::uint32_t>(inc);
-    const bool hermite = interp != Interpolation::Linear;
-    for (std::size_t n = 0; n < kBlock; ++n) {
-        if (ended_) {
-            out[n] = 0.0f;
-            continue;
-        }
-        const float t = static_cast<float>(frac_) * (1.0f / 4294967296.0f);
-        if (hermite) {
-            float xm1, x0, x1, x2;
-            if (pos_ - 1 >= -pre_ && pos_ + 2 < loop_len_) {  // as in the linear case below
-                xm1 = direct(pos_ - 1), x0 = direct(pos_), x1 = direct(pos_ + 1), x2 = direct(pos_ + 2);
-            } else {
-                xm1 = sample_at(pos_ - 1), x0 = sample_at(pos_), x1 = sample_at(pos_ + 1), x2 = sample_at(pos_ + 2);
-            }
-            const float c1 = 0.5f * (x1 - xm1);
-            const float c2 = xm1 - 2.5f * x0 + 2.0f * x1 - 0.5f * x2;
-            const float c3 = 0.5f * (x2 - xm1) + 1.5f * (x0 - x1);
-            out[n] = ((c3 * t + c2) * t + c1) * t + x0;
-        } else {
-            float x0, x1;
-            if (pos_ >= -pre_ && pos_ + 1 < loop_len_) {
-                // Both points inside [-pre, loop_len): no clamp or wrap, and set_wave checked
-                // that the wave covers them (else the voice has ended), so read them directly.
-                x0 = direct(pos_);
-                x1 = direct(pos_ + 1);
-            } else {
-                x0 = sample_at(pos_);
-                x1 = sample_at(pos_ + 1);
-            }
-            out[n] = x0 + (x1 - x0) * t;
-        }
-        const std::uint64_t f = static_cast<std::uint64_t>(frac_) + inc_frac;
-        frac_ = static_cast<std::uint32_t>(f);
-        pos_ += inc_int + static_cast<std::int32_t>(f >> 32);
-        if (loop_len_ == 0) {
-            if (pos_ >= 0) ended_ = true;
-        } else {
-            while (pos_ >= loop_len_) {
-                const std::uint64_t g = static_cast<std::uint64_t>(frac_) + loop_frac_;
-                frac_ = static_cast<std::uint32_t>(g);
-                pos_ += static_cast<std::int32_t>(g >> 32) - loop_len_;
-            }
-        }
-    }
+    // The walk and the interpolation: the resample kernel (accel/kernels.hpp).
+    accel::Walk50 w;
+    w.wave = wave_;
+    w.wave_size = wave_size_;
+    w.loop_start = loop_start_;
+    w.pcm8 = pcm8_;
+    w.pre = pre_;
+    w.loop_len = loop_len_;
+    w.loop_frac = loop_frac_;
+    w.pos = pos_;
+    w.frac = frac_;
+    w.ended = ended_;
+    accel::resample50(w, inc_int, inc_frac, interp != Interpolation::Linear, out, kBlock);
+    pos_ = w.pos;
+    frac_ = w.frac;
+    ended_ = w.ended;
 }
 
-namespace {
-
-/// dst[b][n] += x[n] · g[b], g[b] += dg[b] after each sample, for k buses. The common bus
-/// counts get their own loops (2 = dry only, 3 = dry + reverb, 5 = + chorus, 7 = all) so
-/// that the per-bus chains run side by side.
-template <std::size_t K>
-void mix_fixed(const float* x, float* const* dst, float* g, const float* dg) {
-    std::array<float, K> gg{};
-    for (std::size_t b = 0; b < K; ++b) gg[b] = g[b];
-    for (std::size_t n = 0; n < 128; ++n)
-        for (std::size_t b = 0; b < K; ++b) {
-            dst[b][n] += x[n] * gg[b];
-            gg[b] += dg[b];
-        }
-}
-
-} // namespace
-
-void ChipVoice::mix_ramps(const float* x, float* const* dst, float* g, const float* dg, std::size_t k) {
-    static_assert(kBlock == 128);
-    switch (k) {
-    case 0: return;
-    case 1: mix_fixed<1>(x, dst, g, dg); return;
-    case 2: mix_fixed<2>(x, dst, g, dg); return;
-    case 3: mix_fixed<3>(x, dst, g, dg); return;
-    case 4: mix_fixed<4>(x, dst, g, dg); return;
-    case 5: mix_fixed<5>(x, dst, g, dg); return;
-    case 6: mix_fixed<6>(x, dst, g, dg); return;
-    default: mix_fixed<7>(x, dst, g, dg); return;
-    }
-}
-
-void ChipVoice::render(Buses& buses, const RateTables& rt, Interpolation interp) {
-    if (!active_) return;
+bool ChipVoice::render_begin(const RateTables& rt, Interpolation interp, float* x, SvfStep& svf) {
+    if (!active_) return false;
     // LFO: values from the current phase, then advance.
     const std::uint32_t q = lfo_phase_ >> 18;
     const auto am = static_cast<std::int32_t>((lfo_tri_ ? kLfoTriUni : kLfoSawUni)[q] ^ lfo_phase_);
 
-    std::array<float, kBlock> x{};
-    fetch(rt, interp, x.data());
+    fetch(rt, interp, x);
     lfo_phase_ = (lfo_phase_ + static_cast<std::uint32_t>(lfo_step_)) & 0xfffff;
 
     // Cutoff.
@@ -455,17 +373,19 @@ void ChipVoice::render(Buses& buses, const RateTables& rt, Interpolation interp)
     g_prev_ = g_new_;
     update_gains((amd_ * am) >> (lfo_tri_ ? 5 : 6));
 
-    // Filter: Chamberlin low-pass, f ramps linearly over the block.
-    const float df = (f_new_ - f_prev_) * (1.0f / 128.0f);
-    float f = f_prev_;
-    for (std::size_t n = 0; n < kBlock; ++n) {
-        band_ += f * (x[n] - q_ * band_ - low_);
-        low_ += f * band_;
-        x[n] = low_;
-        f += df;
-    }
-    eq.process(x.data(), kBlock);
-    const bool faded = steal_fade_.apply(x.data(), kBlock);
+    // The filter's block: a Chamberlin low-pass, f ramping linearly over the block (run by the caller,
+    // across a batch of voices: accel::svf50_lanes).
+    svf.band = &band_;
+    svf.low = &low_;
+    svf.f = f_prev_;
+    svf.df = (f_new_ - f_prev_) * (1.0f / 128.0f);
+    svf.q = q_;
+    return true;
+}
+
+void ChipVoice::render_end(Buses& buses, float* x) {
+    eq.process(x, kBlock);
+    const bool faded = steal_fade_.apply(x, kBlock);
 
     // Mix: gain × envelope ramps linearly from the block start to its end.
     const bool chained = chain_ >= 0 && static_cast<std::size_t>(chain_) < buses.chains;
@@ -487,8 +407,16 @@ void ChipVoice::render(Buses& buses, const RateTables& rt, Interpolation interp)
         g[k] = g0;
         dg[k++] = (g1 - g0) * (1.0f / 128.0f);
     }
-    mix_ramps(x.data(), dst.data(), g.data(), dg.data(), k);
+    accel::mix_ramps(x, dst.data(), g.data(), dg.data(), k, kBlock);
     if (done_ || ended_ || faded) active_ = false;
+}
+
+void ChipVoice::render(Buses& buses, const RateTables& rt, Interpolation interp) {
+    std::array<float, kBlock> x{};
+    SvfStep svf;
+    if (!render_begin(rt, interp, x.data(), svf)) return;
+    accel::svf50(*svf.band, *svf.low, svf.f, svf.df, svf.q, x.data(), kBlock);
+    render_end(buses, x.data());
 }
 
 } // namespace hvyxg::syxg50

@@ -12,6 +12,7 @@
 #include <optional>
 #include <vector>
 
+#include "accel/kernels.hpp"
 #include "bank_impl.hpp"
 #include "module.hpp"
 #include "syxg50/bank_data.hpp"
@@ -119,6 +120,14 @@ private:
     const dll::Tables& tb_;
     RateTables rt_;
     std::vector<std::unique_ptr<Voice>> voices_;
+    /// render's batch (accel::kBatch voices): their blocks between the samples and the mix, so the
+    /// filter runs across them (accel::svf50_lanes). 16 KB, allocated once.
+    struct Batch {
+        std::array<std::array<float, kBlock>, accel::kBatch> rows{};
+        std::array<Voice*, accel::kBatch> voice{};
+        std::array<ChipVoice::SvfStep, accel::kBatch> svf{};
+    };
+    std::unique_ptr<Batch> batch_ = std::make_unique<Batch>();
     /// Free voice indices, a FIFO: 0, 1, … at
     /// power-on; a note takes the head, a voice that ends or is
     /// stolen goes to the tail.

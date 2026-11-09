@@ -1719,14 +1719,34 @@ void ToneModule50::render(Buses& buses) {
         ms_done_ += 10;
         tick();
     }
+    // The voices in batches: each voice's control and samples (render_begin), the filter across the
+    // batch, then each voice's EQ, fade and mix in voice order (render_end) -- the buses' sums in the
+    // same order as one voice at a time.
+    Batch& bt = *batch_;
+    std::size_t nb = 0;
+    const auto flush = [&] {
+        if (!nb) return;
+        std::array<float*, accel::kBatch> band{}, low{};
+        std::array<float, accel::kBatch> f{}, df{}, q{};
+        for (std::size_t i = 0; i < nb; ++i) {
+            band[i] = bt.svf[i].band, low[i] = bt.svf[i].low;
+            f[i] = bt.svf[i].f, df[i] = bt.svf[i].df, q[i] = bt.svf[i].q;
+        }
+        accel::svf50_lanes(bt.rows[0].data(), kBlock, band.data(), low.data(), f.data(), df.data(), q.data(), nb, kBlock);
+        for (std::size_t i = 0; i < nb; ++i) bt.voice[i]->chip.render_end(buses, bt.rows[i].data());
+        nb = 0;
+    };
     for (auto& vp : voices_) {
         Voice& v = *vp;
         // A voice whose chip voice has ended stays busy until the AEG monitor frees it.
         if (!v.in_use || !v.chip.active()) continue;
         update(v, false);
         v.chip.set_chain(buses.chain_of(v.part->id));
-        v.chip.render(buses, rt_, ctx_.interpolation);
+        if (!v.chip.render_begin(rt_, ctx_.interpolation, bt.rows[nb].data(), bt.svf[nb])) continue;
+        bt.voice[nb++] = &v;
+        if (nb == accel::kBatch) flush();
     }
+    flush();
     for (auto& t : tails_)
         if (t.active()) t.render(buses, rt_, ctx_.interpolation);
     samples_ += kBlock;

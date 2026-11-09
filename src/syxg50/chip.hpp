@@ -54,6 +54,17 @@ struct RateTables {
 /// One chip voice. The control layer writes the `set_*` registers; `render` runs one block.
 class ChipVoice {
 public:
+    /// One block's filter, for a caller that runs the filter across voices (accel::svf50_lanes): the
+    /// voice's state, and f's start and step and q.
+    struct SvfStep {
+        float* band = nullptr;
+        float* low = nullptr;
+        float f = 0.0f, df = 0.0f, q = 1.0f;
+    };
+    /// A block in three steps, as render() does them: control and the samples into x (false: the voice
+    /// is not active, nothing done); the filter, over x, by the caller (svf); then EQ, fade and the mix.
+    bool render_begin(const RateTables& rt, Interpolation interp, float* x, SvfStep& svf);
+    void render_end(Buses& buses, float* x);
     // ── registers ────────────────────────────────────────────────────────────────────
     /// Key-on: wave + all registers below must be set first.
     void start(const RateTables& rt);
@@ -114,9 +125,6 @@ private:
     void decay_setup(const RateTables& rt);
     void aeg_step();
     void fetch(const RateTables& rt, Interpolation interp, float* out);
-    float sample_at(std::int32_t i) const;
-    float direct(std::int32_t i) const;
-    static void mix_ramps(const float* x, float* const* dst, float* g, const float* dg, std::size_t k);
     void update_gains(std::int32_t am);
     float svf_f(std::int32_t v) const;
 

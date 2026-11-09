@@ -1,0 +1,168 @@
+// Copyright (C) 2026 Kevin H. Patterson
+// SPDX-License-Identifier: BSD-3-Clause (see LICENSE)
+// accel_check: each target kernel (accel/kernels.hpp) against its portable reference on random inputs
+// (docs/ACCELERATION.md, "Accuracy"). Standalone (no assets, no doctest), so it runs where a target's
+// build runs: under qemu (RVV at any VLEN), on the boards. Exit 0 when every kernel is within its bound.
+//
+//   accel_check [ROUNDS]
+//
+// resample50 and svf50_lanes must be exact; mix_ramps within 1e-5 of full scale (-100 dBFS): its ramps are closed form
+// (g0 + i·dg), the reference's 128 additions of dg in a row, each rounded -- up to ~128 roundings apart.
+
+#include "accel/kernels.hpp"
+
+#include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <vector>
+
+using namespace hvyxg::accel;
+
+namespace {
+
+std::uint64_t g_rng = 0x9E3779B97F4A7C15ull;
+std::uint32_t rnd() {
+    g_rng ^= g_rng << 13;
+    g_rng ^= g_rng >> 7;
+    g_rng ^= g_rng << 17;
+    return static_cast<std::uint32_t>(g_rng >> 16);
+}
+std::uint32_t rnd(std::uint32_t n) { return n ? rnd() % n : 0; }
+
+int g_failed = 0;
+
+void check_resample(int rounds) {
+    std::vector<std::uint8_t> wave;
+    long samples = 0, blocks = 0;
+    for (int r = 0; r < rounds; ++r) {
+        const bool pcm8 = rnd(4) == 0, hermite = rnd(2) != 0, oneshot = rnd(4) == 0;
+        const std::size_t bytes = pcm8 ? 1 : 2;
+        const std::int32_t pre = static_cast<std::int32_t>(rnd(64)), loop_len = oneshot ? 0 : 1 + static_cast<std::int32_t>(rnd(r % 3 ? 4000 : 6));
+        const std::size_t loop_start = (static_cast<std::size_t>(pre) + rnd(16)) * bytes;
+        const std::size_t extra = rnd(3) ? 8 : rnd(3);   // sometimes the wave ends right at the loop
+        wave.assign(loop_start + (static_cast<std::size_t>(loop_len) + extra + 4) * bytes, 0);
+        for (auto& b : wave) b = static_cast<std::uint8_t>(rnd());
+        Walk50 a;
+        a.wave = wave.data();
+        a.wave_size = wave.size() - (extra == 0 ? 4 * bytes : 0);
+        a.loop_start = loop_start;
+        a.pcm8 = pcm8;
+        a.pre = pre;
+        a.loop_len = loop_len;
+        a.loop_frac = rnd();
+        a.pos = -static_cast<std::int32_t>(rnd(static_cast<std::uint32_t>(pre) + 1));
+        a.frac = rnd();
+        if (!oneshot && rnd(2)) a.pos = static_cast<std::int32_t>(rnd(static_cast<std::uint32_t>(loop_len)));
+        Walk50 b = a;
+        for (int blk = 0; blk < 8; ++blk) {
+            // steps from very slow to ~16 samples a sample (the DLL's range: up to 2^22 << 17)
+            const std::uint64_t inc = (static_cast<std::uint64_t>(rnd(1u << 22)) << 17) >> rnd(12);
+            const auto ii = static_cast<std::int32_t>(inc >> 32);
+            const auto fi = static_cast<std::uint32_t>(inc);
+            const std::size_t n = 1 + rnd(128);
+            float ya[128], yb[128];
+            ref::resample50(a, ii, fi, hermite, ya, n);
+#if defined(HVYXG_ACCEL_RVV)
+            rvv::resample50(b, ii, fi, hermite, yb, n);
+#else
+            ref::resample50(b, ii, fi, hermite, yb, n);
+#endif
+            ++blocks;
+            samples += static_cast<long>(n);
+            if (std::memcmp(ya, yb, n * sizeof(float)) || a.pos != b.pos || a.frac != b.frac || a.ended != b.ended) {
+                if (g_failed++ < 5) {
+                    std::size_t i = 0;
+                    while (i < n && std::memcmp(&ya[i], &yb[i], 4) == 0) ++i;
+                    std::printf("resample50 DIFFERS: round %d block %d (pcm8 %d hermite %d loop_len %d pre %d inc %#llx n %zu): "
+                                "sample %zu ref %.9g got %.9g; pos %d/%d frac %u/%u ended %d/%d\n",
+                                r, blk, pcm8, hermite, loop_len, pre, static_cast<unsigned long long>(inc), n, i,
+                                i < n ? ya[i] : 0.0, i < n ? yb[i] : 0.0, a.pos, b.pos, a.frac, b.frac, a.ended, b.ended);
+                }
+                break;
+            }
+        }
+    }
+    std::printf("resample50: %ld blocks, %ld samples\n", blocks, samples);
+}
+
+void check_mix(int rounds) {
+    double worst = 0;
+    for (int r = 0; r < rounds; ++r) {
+        const std::size_t buses = 1 + rnd(kMaxBuses), n = 1 + rnd(128);
+        float x[128], da[kMaxBuses][128], db[kMaxBuses][128], g[kMaxBuses], dg[kMaxBuses];
+        float* pa[kMaxBuses];
+        float* pb[kMaxBuses];
+        for (std::size_t i = 0; i < n; ++i) x[i] = static_cast<float>(static_cast<std::int32_t>(rnd()) >> 8) * (1.0f / 8388608.0f);
+        for (std::size_t b = 0; b < buses; ++b) {
+            g[b] = static_cast<float>(rnd(1 << 20)) * (1.0f / 1048576.0f);
+            dg[b] = (static_cast<float>(rnd(1 << 20)) * (1.0f / 1048576.0f) - g[b]) * (1.0f / 128.0f);
+            for (std::size_t i = 0; i < n; ++i) da[b][i] = db[b][i] = static_cast<float>(static_cast<std::int32_t>(rnd()) >> 8) * (1.0f / 8388608.0f);
+            pa[b] = da[b];
+            pb[b] = db[b];
+        }
+        ref::mix_ramps(x, pa, g, dg, buses, n);
+#if defined(HVYXG_ACCEL_RVV)
+        rvv::mix_ramps(x, pb, g, dg, buses, n);
+#else
+        ref::mix_ramps(x, pb, g, dg, buses, n);
+#endif
+        for (std::size_t b = 0; b < buses; ++b)
+            for (std::size_t i = 0; i < n; ++i) worst = std::fmax(worst, std::fabs(static_cast<double>(da[b][i]) - db[b][i]));
+    }
+    std::printf("mix_ramps: largest error %.3g of full scale (%.1f dBFS)\n", worst, worst > 0 ? 20 * std::log10(worst) : -999.0);
+    if (worst > 1e-5) {
+        std::printf("mix_ramps OUT OF BOUND (1e-5)\n");
+        ++g_failed;
+    }
+}
+
+void check_svf_lanes(int rounds) {
+    long voices = 0;
+    for (int r = 0; r < rounds / 8; ++r) {
+        const std::size_t lanes = 1 + rnd(kBatch), n = 1 + rnd(128), stride = 128;
+        static float xa[kBatch * 128], xb[kBatch * 128];
+        float ba[kBatch], la[kBatch], bb[kBatch], lb[kBatch], f[kBatch], df[kBatch], q[kBatch];
+        float* pba[kBatch];
+        float* pla[kBatch];
+        float* pbb[kBatch];
+        float* plb[kBatch];
+        for (std::size_t l = 0; l < lanes; ++l) {
+            for (std::size_t i = 0; i < n; ++i) xa[l * stride + i] = xb[l * stride + i] = static_cast<float>(static_cast<std::int32_t>(rnd()) >> 8) * (1.0f / 8388608.0f);
+            ba[l] = bb[l] = static_cast<float>(static_cast<std::int32_t>(rnd()) >> 10) * (1.0f / 8388608.0f);
+            la[l] = lb[l] = static_cast<float>(static_cast<std::int32_t>(rnd()) >> 10) * (1.0f / 8388608.0f);
+            f[l] = static_cast<float>(rnd(1 << 20)) * (1.0f / 1048576.0f);
+            df[l] = (static_cast<float>(rnd(1 << 20)) * (1.0f / 1048576.0f) - f[l]) * (1.0f / 128.0f);
+            q[l] = 0.1f + static_cast<float>(rnd(1 << 20)) * (1.9f / 1048576.0f);
+            pba[l] = &ba[l], pla[l] = &la[l], pbb[l] = &bb[l], plb[l] = &lb[l];
+        }
+        ref::svf50_lanes(xa, stride, pba, pla, f, df, q, lanes, n);
+#if defined(HVYXG_ACCEL_RVV)
+        rvv::svf50_lanes(xb, stride, pbb, plb, f, df, q, lanes, n);
+#else
+        ref::svf50_lanes(xb, stride, pbb, plb, f, df, q, lanes, n);
+#endif
+        voices += static_cast<long>(lanes);
+        bool same = !std::memcmp(ba, bb, lanes * 4) && !std::memcmp(la, lb, lanes * 4);
+        for (std::size_t l = 0; l < lanes && same; ++l) same = !std::memcmp(xa + l * stride, xb + l * stride, n * 4);
+        if (!same && g_failed++ < 5) std::printf("svf50_lanes DIFFERS: round %d (lanes %zu, n %zu)\n", r, lanes, n);
+    }
+    std::printf("svf50_lanes: %ld voice blocks\n", voices);
+}
+
+} // namespace
+
+int main(int argc, char** argv) {
+    const int rounds = argc > 1 ? std::atoi(argv[1]) : 20000;
+#if defined(HVYXG_ACCEL_RVV)
+    std::printf("accel_check: the RVV kernels against the reference, %d rounds\n", rounds);
+#else
+    std::printf("accel_check: no target kernels in this build (the reference against itself)\n");
+#endif
+    check_resample(rounds);
+    check_mix(rounds);
+    check_svf_lanes(rounds);
+    std::printf(g_failed ? "accel_check: FAILED\n" : "accel_check: all within bounds\n");
+    return g_failed ? 1 : 0;
+}
