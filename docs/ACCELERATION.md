@@ -58,25 +58,28 @@ profiles say so.
 | **i16** | Q15 (the wave's own 16 bits) | Q15 | i32 accumulation | the fastest: twice i32's lanes; the A25's packed 16-bit SIMD |
 
 `Synth::Options` gains `precision` (f32 / i32 / i16; default f32). The forms differ in output, and each
-is checked against the DLL references with its own tolerance; i16 is expected to be closest to what an
-integer DLL does where the DLL is integer (to be measured, not assumed).
+is checked against the DLL references with its own tolerance; i16 may come closest to what a DLL does where
+the DLL works in integers (to be measured, not assumed).
 
-## Exactness
+## Accuracy, not exactness
 
-**Each (form, target) is bit-identical to that form's scalar reference.** So a target is tested by
-comparing digests with the portable build, on any input, without listening tests. That makes three
-rules for the references, which are written in the form a vector unit can match:
+**The accelerated paths are allowed tiny inaccuracies for speed.** The scalar code stays exactly as it
+is, the reference; a kernel on a target may fuse multiply-adds, reassociate, evaluate a ramp in closed
+form (`g0 + n · dg`, where the reference adds `dg` sample by sample), or use cheaper arithmetic, as long
+as it stays within its form's error bound:
 
-- **Closed-form ramps.** Gains and filter coefficients ramp as `g0 + n · dg` (one multiply, one add,
-  each rounded), not by repeated addition (`g += dg`), which no parallel evaluation reproduces. This
-  changes the f32 output, once, by rounding only; it is re-checked against the DLL references.
-- **No contraction.** The f32 kernels are built `-ffp-contract=off` (as the MU ROM converter already
-  is): a fused multiply-add only where the reference spells `fma`.
-- **Defined rounding and saturation** in i32 / i16: every shift's rounding and every narrowing's
-  saturation written out (`vnclip` / `kmmawb`-style ops then match a scalar line).
+- **Per kernel:** random descriptors, the kernel against the scalar reference; the largest error
+  relative to full scale, bounded per (kernel, form) -- f32 near float rounding (about -120 dBFS),
+  i32 by its Q format, i16 by 16 bits (about -90 dBFS).
+- **Whole renders:** `render_yxg` on songs, the target's build against the portable f32 build: the
+  error's level against the signal's (SNR), with a floor per form.
+- **Against the DLLs:** each form through the existing engine tests, with their tolerances.
 
-Reductions are integer only (peak: max; exact in any order). Float sums keep the reference's order:
-across voices a bus is accumulated voice by voice in the reference's voice order.
+Exact where it costs little: the position walk (integer), the integer forms where the operations
+map one to one, and anything a vector unit computes the same way anyway; inexact only where
+exactness would cost real speed (the ramps, FMA, reassociation). Integer reductions (a peak's max)
+are exact in any order. The phase-1 restructuring itself
+changes no arithmetic, and is checked bit for bit against the code it replaces.
 
 ## Targets
 
@@ -108,16 +111,15 @@ rows live in a per-synth scratch area (128 × kLanes floats: 8 KB at 16 lanes).
 - **Host:** every form's scalar reference against the DLL references (the existing engine tests,
   tolerances per form), and the new kernel tests: random descriptors, each kernel against its
   reference.
-- **Bit-exactness per target:** the kernel tests and `render_yxg` digests on songs, the target's
-  build against the portable build -- RVV under qemu at VLEN 128, 256 and 512, XTheadVector on the
-  Pioneer, the A25 under rv32emu with the DSP extension (as hvopl3's a25/digest.sh) and on the Tang.
-- **Board:** `xgbench` (Hira-V's `apps/bench/xgbench.cpp`): load per voice and per song, and its
-  digests against the host's.
+- **Per target:** the kernel tests and `render_yxg` renders against the portable build's, within
+  the bounds above -- RVV under qemu at VLEN 128, 256 and 512, XTheadVector on the Pioneer, the A25
+  under rv32emu with the DSP extension and on the Tang.
+- **Board:** `xgbench` (Hira-V's `apps/bench/xgbench.cpp`): load per voice and per song.
 
 ## Phases
 
-1. **Kernels, scalar, f32.** The descriptor and kernel split in both engines, the references in
-   closed form; the output re-checked against the DLLs; host kernel tests. No speed change yet.
+1. **Kernels, scalar, f32.** The descriptor and kernel split in both engines, the arithmetic
+   unchanged (bit for bit against today's renders); host kernel tests. No speed change yet.
 2. **RVV f32** for the X280; xg.lib built with `v zvl512b`. Digests under qemu and on the Blackhole.
 3. **XTheadVector f32** for the C920 (the same source); on the Pioneer.
 4. **i16** (scalar reference, RVV, DSP), then **i32**.
