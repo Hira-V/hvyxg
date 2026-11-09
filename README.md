@@ -125,10 +125,10 @@ In `include/hvyxg/` (all of it: `hvyxg/hvyxg.hpp`), namespace `hvyxg`:
 
 Errors are `hvyxg::BankError` in the API that reads files, and `hvyxg::Error` in the core's, which
 builds with `HVYXG_NO_FILES=1` for hosts without exceptions or files. The version is in
-`hvyxg/version.hpp` (`HVYXG_VERSION_STRING`, `"0.1.0"`). Threads, the embedded core and how each
+`hvyxg/version.hpp` (`HVYXG_VERSION_STRING`, `"0.1.1"`). Threads, the embedded core and how each
 engine follows its reference: [docs/ENGINE.md](docs/ENGINE.md).
 
-## The renderer: render_yxg
+## The command-line renderer: render_yxg
 
 `render_yxg` renders a Standard MIDI File to a WAV:
 
@@ -174,6 +174,8 @@ committed) or named by environment variables; without them they skip. Every inpu
 fuzzed. The asset tree, the build checks and the fuzzers: [docs/TESTING.md](docs/TESTING.md).
 
 ## Status
+
+0.1.1 revises the README; the code is unchanged from 0.1.0.
 
 0.1.0, the first release: both engines, their effects, the MU banks and the MU ROM converter, the
 supersets and DLL-exact mode, the embedded core, and the renderer.
