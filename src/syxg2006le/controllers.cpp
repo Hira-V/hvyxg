@@ -73,6 +73,10 @@ struct Sums {
 
 int master256(const EngineState& state) { return v256(effective_master_volume(state)); }
 
+int controller_pat(const midi::Part& part, std::uint8_t key) {
+    return part.ram->part_mode == 0 && key >= 0x24 && key <= 0x61 ? part.pat_values[key] & 0x7F : -1;
+}
+
 ControllerSources controller_sources(const midi::Part& part) {
     const auto& ctl = part.controller;
     return {.bend = part.pitchbend,

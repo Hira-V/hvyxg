@@ -56,6 +56,11 @@ ControllerSums controller_sums(const tbl::dll::Tables& tb, const midi::Part& par
 /// The master volume of the level law, 0..256: V[XG master volume] (2·v, 127 → 256). The
 /// universal real-time master volume sets the XG master volume to its MSB (measured over the
 /// whole 14-bit range: LSB ignored, last message wins).
+/// The one per-voice input of controller_sums besides drum and insertion: the poly aftertouch value at
+/// `key` (0..127) where the sums read it, else -1. Voices of a part with equal (drum, insertion, this)
+/// get equal sums within a block.
+int controller_pat(const midi::Part& part, std::uint8_t key);
+
 int master256(const EngineState& state);
 
 } // namespace hvyxg::syxg2006le

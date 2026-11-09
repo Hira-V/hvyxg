@@ -201,6 +201,25 @@ private:
     /// Controller sources latched by the 12 ms controller timer, per part id.
     std::array<ControllerSources, 64> sources_{};
     std::array<const midi::Part*, 64> parts_{};
+    /// Within a render block (in_block_; block_ counts them) a part's controller sums and its voices' EQ settings are
+    /// worked out by its first voice and shared by the rest: pure functions of state no voice changes
+    /// within a block. Outside one (note-on), controls() works them out each time.
+    struct SumsMemo {
+        std::uint32_t block = 0;
+        int key = 0;                    // drum, insertion and the PAT value (controller_pat)
+        ControllerSums sums{};
+    };
+    struct EqMemo {
+        std::uint32_t block = 0;
+        eq::VoiceEqSettings settings{};
+    };
+    static constexpr std::size_t kSumsWays = 4;
+    mutable std::array<std::array<SumsMemo, kSumsWays>, 64> sums_memo_{};
+    std::array<EqMemo, 64> eq_memo_{};
+    std::uint32_t block_ = 0;
+    bool in_block_ = false;
+    int master256_ = 0;                 // master256 for the block
+    ControllerSums sums_for(const midi::Part& part, std::uint8_t note, bool drum, bool insertion) const;
     /// Controller timer: samples rendered, 2 ms ticks done, and
     /// the tick counter (every 6th tick flushes). Run before the block's voices render.
     std::uint64_t rendered_ = 0, ms_done_ = 0;

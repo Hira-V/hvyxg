@@ -953,6 +953,23 @@ void ToneModule2006::kill_all(const midi::Part& part) {
     notes_[part.id % notes_.size()].list.clear();
 }
 
+ControllerSums ToneModule2006::sums_for(const midi::Part& part, std::uint8_t note, bool drum, bool insertion) const {
+    const auto& src = sources_[part.id % sources_.size()];
+    if (!in_block_) return controller_sums(tb_, part, src, *ctx_.shared.system, note, drum, insertion, master256(ctx_.shared));
+    const int key = (controller_pat(part, note) + 1) << 2 | (drum ? 2 : 0) | (insertion ? 1 : 0);
+    auto& ways = sums_memo_[part.id % sums_memo_.size()];
+    std::size_t spare = 0;
+    for (std::size_t i = 0; i < kSumsWays; ++i) {
+        if (ways[i].block == block_ && ways[i].key == key) return ways[i].sums;
+        if (ways[i].block != block_) spare = i;
+    }
+    SumsMemo& m = ways[spare];       // a stale way, else the last (a fifth key in a block recomputes)
+    m.block = block_;
+    m.key = key;
+    m.sums = controller_sums(tb_, part, src, *ctx_.shared.system, note, drum, insertion, master256_);
+    return m.sums;
+}
+
 VoiceControls ToneModule2006::controls(const Slot& s) const {
     const midi::Part& part = *s.part;
     const auto& ram = *part.ram;
@@ -969,9 +986,7 @@ VoiceControls ToneModule2006::controls(const Slot& s) const {
     // DLL-exact: the variation is inert, the insertion part plays like the others.
     const bool insertion_part =
         chained || (!ctx_.dll_exact && !system_var && part.id == fx.variation_part());
-    const ControllerSums sums = controller_sums(tb_, part, sources_[part.id % sources_.size()],
-                                                *ctx_.shared.system, s.note, s.drum, insertion_part,
-                                                master256(ctx_.shared));
+    const ControllerSums sums = sums_for(part, s.note, s.drum, insertion_part);
     VoiceControls c;
     // Pitch.
     const int pitch = p.pitch_cents + sums.pitch + detune_cents(tb_, ram, p.amp.type6, static_cast<std::uint8_t>(s.pitch_key));
@@ -1030,6 +1045,15 @@ void ToneModule2006::render(Buses& buses) {
     controller_timer();
     for (const midi::Part* part : parts_)
         if (part) check_mode(*part);
+    // The block's shared values (sums_for, the EQ memo): from here to the end of the voices nothing a
+    // voice reads changes.
+    if (++block_ == 0) {
+        block_ = 1;
+        for (auto& ways : sums_memo_) ways = {};
+        eq_memo_ = {};
+    }
+    master256_ = master256(ctx_.shared);
+    in_block_ = true;
     std::array<float*, DspVoice::kOutputs> out = {
         buses.dry_l.data(),    buses.dry_r.data(),    buses.reverb.data(),
         buses.chorus_l.data(), buses.chorus_r.data(), buses.variation_l.data(),
@@ -1068,7 +1092,14 @@ void ToneModule2006::render(Buses& buses) {
         out[0] = chain < 0 ? buses.dry_l.data() : buses.chain_l[static_cast<std::size_t>(chain)].data();
         out[1] = chain < 0 ? buses.dry_r.data() : buses.chain_r[static_cast<std::size_t>(chain)].data();
         // Superset part EQ / HPF: live on melodic voices, latched at note-on on drum notes.
-        if (!s.drum) o.dsp.eq.update(eq::voice_settings(ctx_.dll_exact, ctx_.mu_part_eq, *s.part, nullptr, false), ctx_.sample_rate);
+        if (!s.drum) {
+            EqMemo& em = eq_memo_[s.part->id % eq_memo_.size()];
+            if (em.block != block_) {
+                em.block = block_;
+                em.settings = eq::voice_settings(ctx_.dll_exact, ctx_.mu_part_eq, *s.part, nullptr, false);
+            }
+            o.dsp.eq.update(em.settings, ctx_.sample_rate);
+        }
         // A portamento time change re-reads the glide rate of the part's voices (event 0x17,
         o.dsp.set_portamento_rate(tables_, 127 - s.part->ram->portamento_time);
         bt.controls[nb] = controls(s);
@@ -1081,6 +1112,7 @@ void ToneModule2006::render(Buses& buses) {
         if (nb == accel::kBatch) flush();
     }
     flush();
+    in_block_ = false;
 }
 
 bool ToneModule2006::active() const {
