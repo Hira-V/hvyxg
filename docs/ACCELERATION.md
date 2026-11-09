@@ -184,7 +184,22 @@ the chains (a 2006LE block one): cycles a voice and block (xgkbench), before →
 linear 901 → 669, Hermite 1674 → 1500, 16-bit linear 1021 → 888, Hermite 1674 → 1500; 2006LE linear
 424 → 389, Hermite 722 → 662. (LMUL 8 was slower: the registers spill.) The 8-bit linear run also takes
 each lane's pair in one gather of 16-bit words of consecutive bytes. An S-YXG50 voice 0.064 % → 0.051 %
-of a core (128 voices); exact throughout (accel_check, the Blackhole's digests).
+of a core (128 voices); exact throughout (accel_check, the Blackhole's digests). Then each case its own
+out-of-line function (8- / 16-bit × linear / Hermite: sharing one, the compiler's register allocation
+cost a path up to 10 %), the samples interpolated as integer-valued floats with the 1/128 or 1/32768
+once at the end (a power of two commutes with each rounding: the reference bit for bit), and contiguous
+windows gathered in registers: 8-bit Hermite's points as two gathers of 16-bit words, 16-bit linear's as
+one gather of 32-bit words (16-bit Hermite's two would be LMUL 8 and lose). 8-bit linear 669 → 659,
+Hermite 1500 → 1268; 16-bit linear 888 → 725, Hermite 1500 → 1447.
+
+**The S-YXG50's Hermite, accelerated form (inexact by design).** The same Catmull-Rom curve as the
+reference's, its coefficients rearranged (c2 = (x1 - x0) - c1 - c3) and evaluated with fused
+multiply-adds: about 10 operations for 16, the dependent chain shorter (`hermite_m4`). Within 3·10⁻⁷ of
+full scale of the reference (about -130 dBFS; accel_check holds it to 2·10⁻⁶); `HVYXG_ACCEL_EXACT`
+builds the reference's operations instead, bit for bit. 8-bit Hermite 1268 → 1025, 16-bit 1447 → 1329;
+an S-YXG50 Hermite voice 0.071 % → 0.062 % of an X280 core (128 voices). The 2006LE's Hermite is the same
+curve in the same operations, so the same form: 662 → 598 cycles a 64-sample block, within 3·10⁻⁷ of
+full scale. Linear and Lanczos stay exact.
 
 **(Superseded) the voices' state in lanes for good.** The per-block state lives in structure-of-arrays form in
 the module (one array per field, indexed by voice object), DspVoice reaching its fields there: the
