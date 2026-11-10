@@ -125,7 +125,7 @@ In `include/hvyxg/` (all of it: `hvyxg/hvyxg.hpp`), namespace `hvyxg`:
 
 Errors are `hvyxg::BankError` in the API that reads files, and `hvyxg::Error` in the core's, which
 builds with `HVYXG_NO_FILES=1` for hosts without exceptions or files. The version is in
-`hvyxg/version.hpp` (`HVYXG_VERSION_STRING`, `"0.1.1"`). Threads, the embedded core and how each
+`hvyxg/version.hpp` (`HVYXG_VERSION_STRING`, `"0.2.0"`). Threads, the embedded core and how each
 engine follows its reference: [docs/ENGINE.md](docs/ENGINE.md).
 
 ## The command-line renderer: render_yxg
@@ -175,6 +175,14 @@ fuzzed. The asset tree, the build checks and the fuzzers: [docs/TESTING.md](docs
 
 ## Status
 
+0.2.0 adds accelerated paths for Hira-V's RISC-V machines, built where the target defines them:
+RVV 1.0 (the X280) and XTheadVector (the C920) with `HVYXG_ACCEL_RVV`, and the A25's in-order scalar
+core with `HVYXG_ACCEL_DSP`. They cover the resamplers, filters, mixing and the S-YXG2006LE's
+control across voices. Every engine also does less work a block: a voice keeps its controls while no
+message has changed them, and without a vector unit the voices go in small batches. A host build
+renders exactly what 0.1.1 did. The design, the checks and the figures:
+[docs/ACCELERATION.md](docs/ACCELERATION.md).
+
 0.1.1 revises the README; the code is unchanged from 0.1.0.
 
 0.1.0, the first release: both engines, their effects, the MU banks and the MU ROM converter, the
@@ -189,12 +197,12 @@ synths.
 | Path | |
 |---|---|
 | `include/hvyxg/` | The public API |
-| `src/` | The library: the MIDI front end, the two engines (`syxg50/`, `syxg2006le/`), the effects (`fx/`), the MU ROM converter (`syxg50/mu_rom/`), the engine table loader (`dll/`) |
+| `src/` | The library: the MIDI front end, the two engines (`syxg50/`, `syxg2006le/`), the effects (`fx/`), the MU ROM converter (`syxg50/mu_rom/`), the engine table loader (`dll/`), the accelerated kernels (`accel/`) |
 | `tools/` | `render_yxg`, its host `render/` (shared with hvopl3), and `hvyxg-bench` |
 | `tests/` | Unit and engine tests, the allocation check, the embedded core's link check |
 | `fuzz/` | Fuzz targets and their regressions |
 | `third_party/` | doctest, xxHash |
-| `docs/` | [The engine](docs/ENGINE.md), [performance](docs/PERFORMANCE.md), [testing](docs/TESTING.md) |
+| `docs/` | [The engine](docs/ENGINE.md), [performance](docs/PERFORMANCE.md), [the accelerated paths](docs/ACCELERATION.md), [testing](docs/TESTING.md) |
 
 ## License
 
