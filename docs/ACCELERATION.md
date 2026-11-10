@@ -27,7 +27,10 @@ digest, 3.2× the time.)
 **Built: f32 on XTheadVector** (the C920, 2026-11-09): the same kernels, the resamplers with their own
 gathers ("The C920" below); checked on the Pioneer (song digests, `xgkbench check`).
 
-**Not built yet:** the i16 and i32 forms, and the A25's DSP kernels.
+**Built: f32 for the A25** (the Tang, 2026-11-09): `kernels_dsp.cpp`, the kernels reshaped for an
+in-order scalar core ("The A25" below); checked on the Tang.
+
+**Not built yet:** the i16 and i32 forms (tried on the A25: "The A25").
 
 ## Where the time goes
 
@@ -123,6 +126,7 @@ its own lanes and kernel; what differs is the EGs' stages and the LFOs.
   SIMD gain for 32-bit control, but straight-line, cache-friendly passes. Its gain comes with the
   integer forms (i32 / i16): gains from a 256-entry mantissa table and a shift instead of a float
   division, packed 16-bit gains (`smmwb`, `kmda`) in the mix.
+  (Measured 2026-11-09: the A25's time is mostly this control code -- "The A25" below.)
 
 **Built so far (2026-11-09), the 2006LE:** the voice's block split into begin / control / signal /
 end, the batch's control through `accel::control_le` (`src/accel/control_le*.{hpp,cpp}`), reading and
@@ -238,6 +242,34 @@ interpolation) are the earlier C920 build's, bit for bit; and `xgkbench check` r
 against the portable references on random walks (8- and 16-bit waves, odd addresses, steps to 128
 samples a sample, loops and one-shots): the walk exact, the samples within 4.8e-7 of full scale.
 
+**The A25 (2026-11-09).** No vector unit, and Andes DSP is integer only (packed 8/16-bit SIMD in the
+general registers, Q15/Q31 multiplies, 32×32→64 accumulation): nothing for f32. The A25 issues one
+instruction a cycle, in order, so the kernels (`kernels_dsp.cpp`, `HVYXG_ACCEL_DSP`, the x-a25 build) are
+the references' arithmetic reshaped for it: the resamplers keep the walk in registers over runs that
+need no edge checks (the references store the walk to memory every sample, as `out` may alias it) and
+read the samples as integer-valued floats scaled once; the filters run four voices at a time so that
+their dependent chains overlap; the mix's ramps are in closed form (no sample waits for the one before)
+and its products fused; interpolation in the X280's accelerated forms. `HVYXG_ACCEL_EXACT` builds the
+references' operations: its song digests on the Tang equal the portable build's (8 of 8, both engines).
+Hira-V's `xgkbench check` holds the fast forms to the references (within 3.6e-7 of full scale).
+
+Cycles a voice and block on the A25 (xgkbench, reference -> A25): 2006LE linear 4817 -> 2646, Hermite
+9002 -> 4239, Lanczos 16955 -> 6560; S-YXG50 8-bit linear 8352 -> 4984, Hermite 13844 -> 9779, 16-bit
+linear 9310 -> 5553, Hermite 14319 -> 8580; mix_ramps into 2 buses 1492 -> 806, 7 buses 7920 -> 3482;
+peak_ramp 966 -> 691; svf_le_lanes 2455 -> 2018. A voice's share of the Tang's core (xgbench, 32 voices,
+48 kHz; the desktop's own load included in both): S-YXG50 linear 2.27 % -> 1.89 %, Hermite 2.75 % ->
+2.22 %; 2006LE linear 4.66 % -> 4.18 %. The rest is the engines' scalar control code (the 2006LE's
+`mod_tick`, `controls`, `amp_tick`; the S-YXG50's `control`, `update`), which no kernel reaches.
+
+**Integer forms on the A25, measured and not taken (2026-11-09).** An i16 S-YXG50 resampler (samples in
+16-bit units, interpolation by `smmul` on a Q31 fraction, within 1.05 LSB of the reference) ran 1.2-1.5×
+the f32 kernel's speed (8-bit linear 5273 -> 3540 cycles, 16-bit Hermite 8468 -> 6920); a Q20 state /
+Q2.29 coefficient Chamberlin filter ran slower than the f32 one (4930 cycles against 3511: `smmul` and
+its shifts cost more than the FPU's multiply). The A25's time a sample is the walk's scalar steps and
+loads, which no SIMD packs (each voice reads at its own position), and an integer stage between float
+ones pays two conversions; so the integer forms would buy little here unless the whole voice -- filter,
+EQ, mix, the buses -- went integer, and the filter is the part that does not gain.
+
 **(Superseded) the voices' state in lanes for good.** The per-block state lives in structure-of-arrays form in
 the module (one array per field, indexed by voice object), DspVoice reaching its fields there: the
 kernel then reads and writes unit-stride (16 lanes in a couple of cycles, not 16), over all objects at
@@ -290,7 +322,7 @@ builds one arch folder per target; a host build takes the portable one):
 |---|---|---|
 | `kernels_scalar.cpp` | everything (the reference) | none |
 | `kernels_rvv.cpp` | X280 (`-march=..._v_zvl512b`), C920 (GCC's XTheadVector patch: the same intrinsics, as hvopl3's `hvopl3_rvv.inc` does) | V: gathers (`vluxei`), widening (`vwcvt`, `vfwcvt.f.x`), `vnclip`, segment loads where they pay; 64-bit lanes on the X280 (ELEN 64), two 32-bit halves on targets with ELEN 32; VLEN-agnostic (`vsetvl` everywhere), LMUL 1-4 by register pressure; no fractional LMUL (0.7.1 has none) |
-| `kernels_dsp.cpp` | A25 (`__riscv_dsp`, `-mext-dsp`) | packed 16-bit SIMD (`kmda`, `smmwb`, `kmmawb`, `sclip`, `pkbb`), `sunpkd810` for pcm8, 32×32→64 MAC for i32; f32 stays scalar FPU |
+| `kernels_dsp.cpp` | A25 (`__riscv_dsp`, `-mext-dsp`) | f32 on the scalar FPU, shaped for the in-order core (built). For i16 / i32: packed 16-bit SIMD (`kmda`, `smmwb`, `kmmawb`, `sclip`, `pkbb`), `sunpkd810` for pcm8, 32×32→64 MAC -- measured, not taken ("The A25") |
 
 Scalar control code also takes each target's scalar extensions through the compiler: Zba / Zbb on the
 X280 (`sh1add`, `clz` for the log/linear laws), XTheadBa / Bb / MemIdx / Mac on the C920, XAndesPerf on

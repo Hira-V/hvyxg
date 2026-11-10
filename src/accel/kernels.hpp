@@ -92,10 +92,25 @@ void peak_ramp(const float* x, float a, float d, float* peak, std::size_t n);
 } // namespace rvv
 #endif
 
+#if defined(HVYXG_ACCEL_DSP)
+namespace dsp {   // the A25 (kernels_dsp.cpp)
+void resample50(Walk50& w, std::int32_t inc_int, std::uint32_t inc_frac, bool hermite, float* out, std::size_t n);
+void mix_ramps(const float* x, float* const* dst, const float* g, const float* dg, std::size_t buses, std::size_t n);
+void svf50_lanes(float* x, std::size_t stride, float* const* band, float* const* low, const float* f, const float* df,
+                 const float* q, std::size_t lanes, std::size_t n);
+void resample_le(WalkLE& w, std::int32_t inc, InterpLE interp, const float* lanczos, float* out, std::size_t n);
+void svf_le_lanes(float* x, std::size_t stride, float* const* lp, float* const* bp, const float* f, const float* df,
+                  const float* q, std::size_t lanes, std::size_t n);
+void peak_ramp(const float* x, float a, float d, float* peak, std::size_t n);
+} // namespace dsp
+#endif
+
 // The best version built.
 inline void resample50(Walk50& w, std::int32_t inc_int, std::uint32_t inc_frac, bool hermite, float* out, std::size_t n) {
 #if defined(HVYXG_ACCEL_RVV)
     rvv::resample50(w, inc_int, inc_frac, hermite, out, n);
+#elif defined(HVYXG_ACCEL_DSP)
+    dsp::resample50(w, inc_int, inc_frac, hermite, out, n);
 #else
     ref::resample50(w, inc_int, inc_frac, hermite, out, n);
 #endif
@@ -106,6 +121,8 @@ inline void svf50(float& band, float& low, float f, float df, float q, float* x,
 inline void mix_ramps(const float* x, float* const* dst, const float* g, const float* dg, std::size_t buses, std::size_t n) {
 #if defined(HVYXG_ACCEL_RVV)
     rvv::mix_ramps(x, dst, g, dg, buses, n);
+#elif defined(HVYXG_ACCEL_DSP)
+    dsp::mix_ramps(x, dst, g, dg, buses, n);
 #else
     ref::mix_ramps(x, dst, g, dg, buses, n);
 #endif
@@ -114,6 +131,8 @@ inline void svf50_lanes(float* x, std::size_t stride, float* const* band, float*
                         const float* q, std::size_t lanes, std::size_t n) {
 #if defined(HVYXG_ACCEL_RVV)
     rvv::svf50_lanes(x, stride, band, low, f, df, q, lanes, n);
+#elif defined(HVYXG_ACCEL_DSP)
+    dsp::svf50_lanes(x, stride, band, low, f, df, q, lanes, n);
 #else
     ref::svf50_lanes(x, stride, band, low, f, df, q, lanes, n);
 #endif
@@ -122,6 +141,8 @@ inline void svf50_lanes(float* x, std::size_t stride, float* const* band, float*
 inline void resample_le(WalkLE& w, std::int32_t inc, InterpLE interp, const float* lanczos, float* out, std::size_t n) {
 #if defined(HVYXG_ACCEL_RVV)
     rvv::resample_le(w, inc, interp, lanczos, out, n);
+#elif defined(HVYXG_ACCEL_DSP)
+    dsp::resample_le(w, inc, interp, lanczos, out, n);
 #else
     ref::resample_le(w, inc, interp, lanczos, out, n);
 #endif
@@ -130,6 +151,8 @@ inline void svf_le_lanes(float* x, std::size_t stride, float* const* lp, float* 
                          const float* q, std::size_t lanes, std::size_t n) {
 #if defined(HVYXG_ACCEL_RVV)
     rvv::svf_le_lanes(x, stride, lp, bp, f, df, q, lanes, n);
+#elif defined(HVYXG_ACCEL_DSP)
+    dsp::svf_le_lanes(x, stride, lp, bp, f, df, q, lanes, n);
 #else
     ref::svf_le_lanes(x, stride, lp, bp, f, df, q, lanes, n);
 #endif
@@ -137,6 +160,8 @@ inline void svf_le_lanes(float* x, std::size_t stride, float* const* lp, float* 
 inline void peak_ramp(const float* x, float a, float d, float* peak, std::size_t n) {
 #if defined(HVYXG_ACCEL_RVV)
     rvv::peak_ramp(x, a, d, peak, n);
+#elif defined(HVYXG_ACCEL_DSP)
+    dsp::peak_ramp(x, a, d, peak, n);
 #else
     ref::peak_ramp(x, a, d, peak, n);
 #endif
