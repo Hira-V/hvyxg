@@ -102,6 +102,12 @@ private:
         bool dying = false;
         /// The handle that started it, and a copy of its record while dying.
         std::size_t owner = 0;
+        /// Its controls (controls()) and EQ settings as of the front end's event count `ctl_events`
+        /// and the controller timer's epoch `ctl_epoch` (render: kept while neither moves).
+        bool ctl_valid = false;
+        std::uint32_t ctl_events = 0, ctl_epoch = 0;
+        std::size_t ctl_part = 0;           // its part's id (the insertion chain)
+        VoiceControls ctl{};
         Slot info;
     };
     DspVoice& dsp(Slot& s) { return objs_[s.obj].dsp; }
@@ -224,6 +230,9 @@ private:
     std::array<EqMemo, 64> eq_memo_{};
     std::uint32_t block_ = 0;
     bool in_block_ = false;
+    /// Bumped when the controller timer's flush changes a part's latched sources (sources_): with the
+    /// front end's event count, what a voice's controls depend on (Obj::ctl).
+    std::uint32_t epoch_ = 0;
     int master256_ = 0;                 // master256 for the block
     ControllerSums sums_for(const midi::Part& part, std::uint8_t note, bool drum, bool insertion) const;
     /// Controller timer: samples rendered, 2 ms ticks done, and

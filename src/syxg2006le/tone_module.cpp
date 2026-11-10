@@ -300,7 +300,10 @@ void ToneModule2006::controller_timer() {
                 refresh_scores();
             }
             for (std::size_t i = 0; i < parts_.size(); ++i)
-                if (parts_[i]) sources_[i] = controller_sources(*parts_[i]);
+                if (parts_[i]) {
+                    const ControllerSources now = controller_sources(*parts_[i]);
+                    if (!(now == sources_[i])) sources_[i] = now, ++epoch_;
+                }
         } else {
             ++timer_count_;
         }
@@ -1144,13 +1147,18 @@ void ToneModule2006::render(Buses& buses) {
             if (o.dying) o.busy = o.dying = false;
             continue;
         }
-        const Slot& s = o.dying ? o.info : slots_[o.owner];
         tables_.random(); // the engine advances its LFSR before each voice
-        const int chain = buses.chain_of(s.part->id);
+        // A voice's controls and EQ settings are functions of state that only messages (the front end's
+        // event count) and the controller timer's flushes (epoch_) change: while neither has moved
+        // since its last block, it keeps them (the same values, without reading its slot and part).
+        const std::uint32_t events = ctx_.shared.events ? *ctx_.shared.events : 0;
+        const bool kept = o.ctl_valid && ctx_.shared.events && o.ctl_events == events && o.ctl_epoch == epoch_;
+        const Slot& s = o.dying ? o.info : slots_[o.owner];   // (read only when not kept)
+        const int chain = buses.chain_of(kept ? o.ctl_part : s.part->id);
         out[0] = chain < 0 ? buses.dry_l.data() : buses.chain_l[static_cast<std::size_t>(chain)].data();
         out[1] = chain < 0 ? buses.dry_r.data() : buses.chain_r[static_cast<std::size_t>(chain)].data();
         // Superset part EQ / HPF: live on melodic voices, latched at note-on on drum notes.
-        if (!s.drum) {
+        if (!s.drum && !kept) {
             EqMemo& em = eq_memo_[s.part->id % eq_memo_.size()];
             if (em.block != block_) {
                 em.block = block_;
@@ -1159,16 +1167,20 @@ void ToneModule2006::render(Buses& buses) {
             o.dsp.eq.update(em.settings, ctx_.sample_rate);
         }
         // A portamento time change re-reads the glide rate of the part's voices (event 0x17,
-        o.dsp.set_portamento_rate(tables_, 127 - s.part->ram->portamento_time);
+        if (!kept) o.dsp.set_portamento_rate(tables_, 127 - s.part->ram->portamento_time);
         Batch& bt = *cur;
-        bt.controls[bt.n] = controls(s);
+        if (!kept) {
+            o.ctl = controls(s);
+            o.ctl_valid = true, o.ctl_events = events, o.ctl_epoch = epoch_, o.ctl_part = s.part->id;
+        }
+        bt.controls[bt.n] = o.ctl;
         if (!o.dsp.begin(tables_)) {
             if (o.dying && !o.dsp.active()) o.busy = o.dying = false;
             continue;
         }
         bt.out[bt.n] = out;
         bt.obj[bt.n++] = &o;
-        if (bt.n == accel::kBatch) flush();
+        if (bt.n == accel::kBatchFill) flush();
     }
     flush();                          // the last batch's control, and the one before it
     finish(*prev);                    // the last

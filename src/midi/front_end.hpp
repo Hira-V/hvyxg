@@ -168,6 +168,8 @@ private:
     std::size_t part_count_;
 
     ResetMode mode_ = ResetMode::XG;
+    /// EngineState::events: every message, reset and all-notes-off.
+    std::uint32_t events_ = 0;
     xg::System system_;
     std::uint16_t gm_master_volume_ = 0x3FFF;
     xg::EffectData effect_;

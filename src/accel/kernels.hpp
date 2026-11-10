@@ -169,5 +169,17 @@ inline void peak_ramp(const float* x, float a, float d, float* peak, std::size_t
 
 /// The most voices a batch takes (svf50_lanes' lanes).
 inline constexpr std::size_t kBatch = 32;
+/// How many voices the modules gather before running a batch (at most kBatch): a vector unit's batch,
+/// else one group of the scalar filters (the A25's run four voices side by side), so that the rows in
+/// flight stay small -- 32 rows of 128 floats are 16 KB, half the A25's data cache, and the batch's
+/// size changes nothing else (docs/ACCELERATION.md, "The A25"). HVYXG_BATCH_FILL overrides it.
+#if defined(HVYXG_BATCH_FILL)
+inline constexpr std::size_t kBatchFill = HVYXG_BATCH_FILL;
+#elif defined(HVYXG_ACCEL_RVV)
+inline constexpr std::size_t kBatchFill = kBatch;
+#else
+inline constexpr std::size_t kBatchFill = 4;
+#endif
+static_assert(kBatchFill >= 1 && kBatchFill <= kBatch);
 
 } // namespace hvyxg::accel

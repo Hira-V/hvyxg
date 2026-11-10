@@ -38,6 +38,7 @@ struct ControllerSources {
     std::uint8_t cat = 0;
     std::uint8_t mw = 0;
     std::array<std::uint8_t, 2> ac{};
+    bool operator==(const ControllerSources&) const = default;
 };
 
 /// The current source values of `part`.

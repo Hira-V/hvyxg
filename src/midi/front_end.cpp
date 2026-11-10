@@ -105,6 +105,7 @@ EngineState FrontEnd::state() const {
     s.multi_eq = &multi_eq_;
     s.parts = parts_.data();
     s.part_count = part_count_;
+    s.events = &events_;
     return s;
 }
 
@@ -126,6 +127,7 @@ void FrontEnd::rebuild_routing() {
 }
 
 void FrontEnd::power_on() {
+    ++events_;
     emit(action::Init{state()});
     reset(ResetMode::XG);
 }
@@ -133,6 +135,7 @@ void FrontEnd::power_on() {
 // ── Resets ──────────────────────────────────────────────────────────────────────────────
 
 void FrontEnd::reset(ResetMode mode) {
+    ++events_;
     for (std::size_t i = 0; i < part_count_; ++i) emit(action::KillAll{&parts_[i]});
     emit(action::Reset{});
     mode_ = mode;
@@ -200,6 +203,7 @@ void FrontEnd::reset(ResetMode mode) {
 }
 
 void FrontEnd::all_notes_off() {
+    ++events_;
     for (std::size_t i = 0; i < part_count_; ++i) emit(action::ReleaseAll{&parts_[i]});
 }
 
@@ -350,6 +354,7 @@ xg::DrumSetup* FrontEnd::drum_note(Part& p, std::uint8_t note) {
 
 void FrontEnd::message(std::span<const std::uint8_t> msg, std::size_t port) {
     if (msg.empty()) return;
+    ++events_;
     const std::uint8_t status = msg[0];
     if (status == 0xF0) {
         sysex(msg);

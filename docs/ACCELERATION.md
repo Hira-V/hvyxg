@@ -261,6 +261,29 @@ peak_ramp 966 -> 691; svf_le_lanes 2455 -> 2018. A voice's share of the Tang's c
 2.22 %; 2006LE linear 4.66 % -> 4.18 %. The rest is the engines' scalar control code (the 2006LE's
 `mod_tick`, `controls`, `amp_tick`; the S-YXG50's `control`, `update`), which no kernel reaches.
 
+**The A25's control code and its cache (2026-11-09).** Beyond the kernels, what the A25 pays for is
+memory: its data cache is 32 KB and a miss costs about 200 cycles (Hira-V's docs/CACHE.md), and a voice's
+per-block cost grew with the voice count (S-YXG50 1.06 % of a core a voice at 4 voices, 1.88 % at 32;
+2006LE 2.62 % -> 3.96 %). Two changes, both exact (song digests on the Tang equal the portable build's;
+16 songs on both engines rendered on the host byte-identical before and after):
+
+- **The batch's size** (`accel::kBatchFill`): the modules gather 4 voices before running a batch where
+  there is no vector unit (32 with one), so the rows in flight stay small (32 rows of 128 floats are
+  16 KB, and two batches were in flight). S-YXG50 32 voices 1.88 % -> 1.47 % a voice; 2006LE 3.96 % ->
+  3.47 %.
+- **Controls kept while nothing changes.** A 2006LE voice's controls (`controls()`: the controller sums,
+  pitch, cutoff, level, pan, sends), its EQ settings and its portamento rate are functions of state that
+  only messages and the controller timer's flushes change. The front end now counts what it takes
+  (`EngineState::events`: every message, reset and all-notes-off), the module counts the flushes that
+  change a part's latched sources (`epoch_`), and a voice keeps what it worked out while neither has moved
+  -- without reading its slot or part. The S-YXG50 re-applies a voice's EQ settings only when the count
+  has moved. 2006LE 32 voices 3.47 % -> 2.45 % a voice; S-YXG50 1.47 % -> 1.46 %.
+
+From the start of the A25's work to here, a voice of the Tang's core at 32 voices (48 kHz; the desktop's
+own load included): S-YXG50 linear 2.27 % -> 1.46 %, Hermite 2.75 % -> 1.78 %; 2006LE linear 4.66 % ->
+2.45 %. The kept controls help every machine (no message, no recompute); the batch size is unchanged
+where there is a vector unit.
+
 **Integer forms on the A25, measured and not taken (2026-11-09).** An i16 S-YXG50 resampler (samples in
 16-bit units, interpolation by `smmul` on a Q31 fraction, within 1.05 LSB of the reference) ran 1.2-1.5×
 the f32 kernel's speed (8-bit linear 5273 -> 3540 cycles, 16-bit Hermite 8468 -> 6920); a Q20 state /

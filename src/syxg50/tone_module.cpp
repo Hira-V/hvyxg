@@ -76,6 +76,10 @@ struct ToneModule50::Voice {
     // messages (`Part::touch`), the LFO fade (bit 0) and sample-and-hold (bit 2).
     bool flag0 = false, flag12 = false;
     std::uint32_t touch_seen = 0;
+    /// The front end's event count (EngineState::events) its EQ settings were last applied at: they
+    /// change only with a message, so update() re-applies them only when it has moved.
+    bool eq_valid = false;
+    std::uint32_t eq_events = 0;
     int stage = 3;            // v[1]: 3 attack/D1, 5 the same after the auto-release, 4 D2,
                               // 1 released, 6 key-off before a delayed key-on
     int score = 0xff;
@@ -1370,7 +1374,13 @@ void ToneModule50::update(Voice& v, bool tick) {
     const midi::xg::MultiPart& ram = *part.ram;
     const Ctl& c = ctl(part);
     // Superset part EQ / HPF: live on melodic voices, latched at note-on on drum keys.
-    if (v.kind == 0) v.chip.eq.update(eq::voice_settings(ctx_.dll_exact, ctx_.mu_part_eq, part, nullptr, false), ctx_.sample_rate);
+    if (v.kind == 0) {
+        const std::uint32_t events = ctx_.shared.events ? *ctx_.shared.events : 0;
+        if (!v.eq_valid || !ctx_.shared.events || v.eq_events != events) {
+            v.chip.eq.update(eq::voice_settings(ctx_.dll_exact, ctx_.mu_part_eq, part, nullptr, false), ctx_.sample_rate);
+            v.eq_valid = true, v.eq_events = events;
+        }
+    }
     // Pitch: the control layer writes the pitch register only at the note-on and in
     // the 10-ms tick (every voice every tick), so bend, the pitch
     // controllers, fine / coarse tune and master tune reach a sounding voice at the next tick,
@@ -1780,7 +1790,7 @@ void ToneModule50::render(Buses& buses) {
         v.chip.set_chain(buses.chain_of(v.part->id));
         if (!v.chip.begin()) continue;
         cur->voice[cur->n++] = &v;
-        if (cur->n == accel::kBatch) {
+        if (cur->n == accel::kBatchFill) {
             issue(*cur);
             finish(*prev);
             std::swap(cur, prev);

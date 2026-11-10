@@ -34,6 +34,9 @@ struct EngineState {
     /// The parts, indexed by `Part::id`.
     const midi::Part* parts = nullptr;
     std::size_t part_count = 0;
+    /// Counts what changes the state above: every message the front end takes, its resets and its
+    /// all-notes-off. An engine may keep what it works out from that state while this stays the same.
+    const std::uint32_t* events = nullptr;
 };
 
 /// The master volume the voices use, 0..127: the XG master volume, which the universal
