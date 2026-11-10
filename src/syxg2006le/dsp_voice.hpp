@@ -154,10 +154,6 @@ public:
     bool waiting() const { return state_ == State::Delay || (state_ == State::Running && !started_); }
     bool released() const { return released_; }
 
-    /// Superset: the part / drum-note EQ and HPF after the filter, before the outputs
-    /// (eq.hpp; set by the tone module, nothing while flat).
-    eq::VoiceEq eq;
-
     /// Steal-score inputs (the renderer getters read):
     /// the voice state class: 0 key-on delay, 1 keyed, 2 released, 3 idle.
     int score_state() const;
@@ -292,12 +288,23 @@ private:
     std::array<float, kOutputs> mix_from_{}, mix_to_{};
 
     AmpEg eg_;
-    AmpEgParams amp_;
     ModEg peg_, feg_;
     Lfo lfo_;
     bool mixed_ = false;
     /// The block's start gate (begin).
     bool gated_ = false;
+
+    // The members above are what a sounding voice's block reads and writes; what follows is read at
+    // the note-on and on the rare events (a small core's data cache holds more voices that way:
+    // docs/ACCELERATION.md, "The A25's control code and its cache"). The EQ's first line is what
+    // its block reads.
+public:
+    /// Superset: the part / drum-note EQ and HPF after the filter, before the outputs
+    /// (eq.hpp; set by the tone module, nothing while flat).
+    eq::VoiceEq eq;
+
+private:
+    AmpEgParams amp_;
 };
 
 } // namespace hvyxg::syxg2006le

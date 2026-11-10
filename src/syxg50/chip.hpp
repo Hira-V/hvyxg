@@ -134,9 +134,6 @@ public:
     /// The DLL's physical chip voice (0..255) this voice was keyed on, -1 none.
     int phys = -1;
 
-    /// Superset: the part / drum-note EQ and HPF after the filter, before the outputs
-    /// (eq.hpp; set by the tone module, nothing while flat).
-    eq::VoiceEq eq;
 
 private:
     void attack_setup(const RateTables& rt);
@@ -224,6 +221,14 @@ private:
     std::array<float, 7> g_prev_{};
     std::array<float, 7> g_new_{};
     std::array<float, 7> mix_from_{}, mix_to_{};
+
+    // After what a sounding voice's block reads and writes, so that those fields lie together (a small
+    // core's data cache: docs/ACCELERATION.md, "The A25's control code and its cache"); its block reads
+    // the EQ's first line alone.
+public:
+    /// Superset: the part / drum-note EQ and HPF after the filter, before the outputs
+    /// (eq.hpp; set by the tone module, nothing while flat).
+    eq::VoiceEq eq;
 };
 
 } // namespace hvyxg::syxg50

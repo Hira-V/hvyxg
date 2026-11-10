@@ -279,9 +279,27 @@ per-block cost grew with the voice count (S-YXG50 1.06 % of a core a voice at 4 
   -- without reading its slot or part. The S-YXG50 re-applies a voice's EQ settings only when the count
   has moved. 2006LE 32 voices 3.47 % -> 2.45 % a voice; S-YXG50 1.47 % -> 1.46 %.
 
+Then (2026-11-09, both exact by the same checks): **the voices' fields packed** -- each voice's EQ
+(136 bytes, of which its block reads the first line; `VoiceEq`'s fade and flags put first) and the 2006LE's
+note-on-only `AmpEgParams` moved after what a sounding voice's block reads, and the 2006LE pool's copies of
+dying voices' records (352 bytes an object) beside the pool rather than in it: 2006LE 2.45 % -> about
+2.3 % a voice, the S-YXG50 unchanged within the noise (its voice was already mostly hot). The 2006LE's
+scan of the parts' XG EG times runs only when the event count has moved. **Divisions and `ldexp` by powers
+of two** became products with the power of two (exact), and `attenuation_gain`'s division a double product
+rounded to float (exact: p / 131071 is never within 2^-42 of a float rounding midpoint, the product within
+2^-51; checked over all 2.2 million inputs): within the noise on the A25 (2.28 % -> 2.26 %), as the A25's
+time is not in its arithmetic.
+
+**Measured and not taken.** Touching the next voice's lines ahead (loads to `x0`) made the 2006LE much
+slower (2.55 % -> 3.65 % a voice): the A25 stalls on a missing load whether or not its result is used, so
+misses do not overlap. **Single instead of double precision** in the 2006LE's control: its doubles are the
+LFO's few x87-precision products and conversions; the A25's FPU does double adds and multiplies at
+single's latency (only division and square root are slower: 30 cycles against 17), so single would save
+little, and it would change the samples and their match with the DLL. They stay double.
+
 From the start of the A25's work to here, a voice of the Tang's core at 32 voices (48 kHz; the desktop's
-own load included): S-YXG50 linear 2.27 % -> 1.46 %, Hermite 2.75 % -> 1.78 %; 2006LE linear 4.66 % ->
-2.45 %. The kept controls help every machine (no message, no recompute); the batch size is unchanged
+own load included): S-YXG50 linear 2.27 % -> 1.44 %, Hermite 2.75 % -> 1.78 %; 2006LE linear 4.66 % ->
+2.27 %. The kept controls help every machine (no message, no recompute); the batch size is unchanged
 where there is a vector unit.
 
 **Integer forms on the A25, measured and not taken (2026-11-09).** An i16 S-YXG50 resampler (samples in

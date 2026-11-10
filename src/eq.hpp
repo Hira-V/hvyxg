@@ -150,9 +150,11 @@ private:
     };
     void process_fading(float* x, std::size_t n);
 
-    VoiceEqSettings s_{};
-    Path cur_{}, old_{};
+    // What process() reads every block first (the fade, then the current path's flags at its start):
+    // a flat EQ's block touches one cache line of it.
     std::uint32_t fade_ = 0, fade_len_ = 0;
+    Path cur_{}, old_{};
+    VoiceEqSettings s_{};
 };
 
 // ── Multi EQ ────────────────────────────────────────────────────────────────────────────

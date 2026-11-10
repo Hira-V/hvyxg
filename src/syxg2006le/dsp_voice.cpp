@@ -4,6 +4,7 @@
 #include "accel/kernels.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstddef>
 #include <initializer_list>
@@ -767,7 +768,9 @@ float DspVoice::filter_coefficient(const RateTables& t, std::int32_t cutoff, int
     lc = std::min(lc, ceiling);
     lc -= lfo_.out_filter;
     lc = std::max<std::int32_t>(lc, 0);
-    return std::min(1.0f, static_cast<float>(256 + ((lc >> 8) & 255)) / std::ldexp(1.0f, 24 - (lc >> 16)));
+    // ÷ 2^(24 - octave) as · 2^(octave - 24) (exact: a power of two, the result normal)
+    return std::min(1.0f, static_cast<float>(256 + ((lc >> 8) & 255)) *
+                              std::bit_cast<float>(static_cast<std::uint32_t>((lc >> 16) - 24 + 127) << 23));
 }
 
 bool DspVoice::begin(RateTables& t) {
@@ -800,7 +803,9 @@ void DspVoice::control(RateTables& t, const VoiceControls& c) {
                      (pos_ >= 0 ? loop_tune_ : 0);
     b = std::clamp<std::int32_t>(b, -0x80000, 0x80000);
     const std::int32_t v = b >> 6;
-    inc_ = static_cast<std::int32_t>(std::ldexp(t.pitch[static_cast<std::size_t>(v & 0x3FF)], (v >> 10) + 15));
+    // ldexp(T[v & 0x3FF], (v >> 10) + 15) as a product with the power of two (exact; v >> 10 is -8 .. 8)
+    inc_ = static_cast<std::int32_t>(t.pitch[static_cast<std::size_t>(v & 0x3FF)] *
+                                     std::bit_cast<float>(static_cast<std::uint32_t>((v >> 10) + 15 + 127) << 23));
 
     // Filter EG → filter.
     mod_tick(feg_, gated_);

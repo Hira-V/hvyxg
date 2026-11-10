@@ -108,8 +108,10 @@ private:
         std::uint32_t ctl_events = 0, ctl_epoch = 0;
         std::size_t ctl_part = 0;           // its part's id (the insertion chain)
         VoiceControls ctl{};
-        Slot info;
     };
+    /// A dying object's copy of its handle's record (dying_[object]): beside the pool, not in it, so
+    /// that the objects a block reads lie close together.
+    std::vector<Slot> dying_;
     DspVoice& dsp(Slot& s) { return objs_[s.obj].dsp; }
     const DspVoice& dsp(const Slot& s) const { return objs_[s.obj].dsp; }
     /// A melodic note object of a part's note handler (the list,
@@ -233,6 +235,9 @@ private:
     /// Bumped when the controller timer's flush changes a part's latched sources (sources_): with the
     /// front end's event count, what a voice's controls depend on (Obj::ctl).
     std::uint32_t epoch_ = 0;
+    /// The event count xg_eg_changes last looked at the parts for.
+    bool eg_events_valid_ = false;
+    std::uint32_t eg_events_ = 0;
     int master256_ = 0;                 // master256 for the block
     ControllerSums sums_for(const midi::Part& part, std::uint8_t note, bool drum, bool insertion) const;
     /// Controller timer: samples rendered, 2 ms ticks done, and

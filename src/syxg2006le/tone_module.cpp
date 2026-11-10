@@ -68,6 +68,7 @@ ToneModule2006::ToneModule2006(std::shared_ptr<const BankData> bank, const Modul
     for (std::size_t i = 0; i < live_limit_; ++i) push_free(i);
     // Handle i starts on object i; the free-object cursor starts after them.
     objs_.resize(live_limit_ + spare_objects(ctx, live_limit_));
+    dying_.resize(objs_.size());
     for (std::size_t i = 0; i < objs_.size(); ++i) objs_[i].dsp.init_object(static_cast<int>(i));
     for (std::size_t i = 0; i < live_limit_; ++i) slots_[i].obj = i;
     cursor_ = live_limit_;
@@ -174,7 +175,7 @@ void ToneModule2006::kill_handle(Slot& s, int rate, bool steal) {
         o.busy = false;
     } else {
         o.dying = true;
-        o.info = s;
+        dying_[static_cast<std::size_t>(&o - objs_.data())] = s;
         const auto fade = steal ? steal_fade_samples(ctx_.steal_fade_ms, ctx_.sample_rate) : std::uint32_t{0};
         if (fade) o.dsp.start_steal_fade(fade);
         else o.dsp.kill(tables_, rate);
@@ -262,7 +263,12 @@ void ToneModule2006::track(const midi::Part& part) {
 void ToneModule2006::xg_eg_changes() {
     // An XG attack / decay / release change (CC73 / 75 / 72, 08 nn 1A / 1B / 1C) is re-applied
     // to the part's sounding voices: the attack and the decays from their pre-XG rates; the
-    // release only on voices already released, from the current pedal.
+    // release only on voices already released, from the current pedal. Only a message changes
+    // them: the parts are looked at again only when the front end's event count has moved.
+    if (ctx_.shared.events) {
+        if (eg_events_valid_ && eg_events_ == *ctx_.shared.events) return;
+        eg_events_valid_ = true, eg_events_ = *ctx_.shared.events;
+    }
     for (std::size_t id = 0; id < parts_.size(); ++id) {
         const midi::Part* part = parts_[id];
         if (!part) continue;
@@ -1153,7 +1159,7 @@ void ToneModule2006::render(Buses& buses) {
         // since its last block, it keeps them (the same values, without reading its slot and part).
         const std::uint32_t events = ctx_.shared.events ? *ctx_.shared.events : 0;
         const bool kept = o.ctl_valid && ctx_.shared.events && o.ctl_events == events && o.ctl_epoch == epoch_;
-        const Slot& s = o.dying ? o.info : slots_[o.owner];   // (read only when not kept)
+        const Slot& s = o.dying ? dying_[static_cast<std::size_t>(&o - objs_.data())] : slots_[o.owner];   // (read only when not kept)
         const int chain = buses.chain_of(kept ? o.ctl_part : s.part->id);
         out[0] = chain < 0 ? buses.dry_l.data() : buses.chain_l[static_cast<std::size_t>(chain)].data();
         out[1] = chain < 0 ? buses.dry_r.data() : buses.chain_r[static_cast<std::size_t>(chain)].data();
