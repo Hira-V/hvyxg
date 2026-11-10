@@ -24,9 +24,10 @@ The S-YXG2006LE on the Blackhole (`xgbench voices 32 128`, 48 kHz, 1.64 GHz), a 
 (The Lanczos column's scalar figure is the same build with Lanczos sent to the reference: the same
 digest, 3.2× the time.)
 
-**Not built yet:** XTheadVector run on the Pioneer (it compiles; the C920's 16-bit gathers are filled
-one by one for want of 32-bit indices), the i16 and i32 forms, the A25's DSP kernels, and the 2006LE's
-control code (now most of a voice's time).
+**Built: f32 on XTheadVector** (the C920, 2026-11-09): the same kernels, the resamplers with their own
+gathers ("The C920" below); checked on the Pioneer (song digests, `xgkbench check`).
+
+**Not built yet:** the i16 and i32 forms, and the A25's DSP kernels.
 
 ## Where the time goes
 
@@ -115,9 +116,9 @@ its own lanes and kernel; what differs is the EGs' stages and the LFOs.
   x87-double products at e64 m2. Tables (pitch mantissas, filter ceilings) by indexed loads. The
   scalar core reads the results once per batch (a scalar read waits for the vector queue to drain, so
   once, not per voice).
-- **C920 (RVV 0.7.1, VLEN 128):** the same source: 4 lanes at e32 m1, so m4 for 16; no fractional
-  LMUL is needed (control is all 32- and 64-bit); e64 for the doubles. Its vector unit sits in the
-  out-of-order core, so the scalar read-back costs less than on the X280.
+- **C920 (RVV 0.7.1, VLEN 128):** the same source: 4 lanes at e32 m1; no fractional LMUL is needed
+  (control is all 32- and 64-bit); e64 for the doubles. Its vector unit sits in the out-of-order core,
+  so the scalar read-back costs less than on the X280. (Measured: m1 beats m2 there -- "The C920" below.)
 - **A25 (Andes DSP, RV32, no vector unit):** the lanes run the reference code in a lane loop -- no
   SIMD gain for 32-bit control, but straight-line, cache-friendly passes. Its gain comes with the
   integer forms (i32 / i16): gains from a 256-entry mantissa table and a shift instead of a float
@@ -201,6 +202,42 @@ an S-YXG50 Hermite voice 0.071 % → 0.062 % of an X280 core (128 voices). The 2
 curve in the same operations, so the same form: 662 → 598 cycles a 64-sample block, within 3·10⁻⁷ of
 full scale. Linear and Lanczos stay exact.
 
+**The C920 (2026-11-09).** The X280's resamplers gather 8- and 16-bit samples by 32-bit offsets, which
+XTheadVector (RVV 0.7.1) cannot do: its indexed loads take offsets as wide as their elements, and the
+C920 traps on a misaligned element (`xgkbench align`: a 32-bit gather at byte offsets is `mcause` 4), so
+the C920 had been filling each lane's points by the scalar core. Now each chunk of 16 lanes (LMUL 4)
+is read from its first point by offsets as narrow as the samples -- 8-bit offsets for 8-bit waves
+(a chunk spanning up to 255 samples), 16-bit for 16-bit -- in indexed segment loads (`th.vlxseg2e` /
+`4e` / `6e`), with the X280's arithmetic (the accelerated forms; `HVYXG_ACCEL_EXACT` the reference's).
+**0.7.1's offsets are signed** (sign-extended; RVV 1.0's are unsigned): the base sits in the middle of the
+range and each offset's top bit is flipped. A chunk too wide for its offsets, or a 16-bit wave at an odd
+address, has its points filled by the scalar core. Cycles a voice and block on the C920 (xgkbench,
+before -> after): S-YXG50 8-bit linear 2109 -> 1534, Hermite 4464 -> 2120, 16-bit linear 2981 -> 1414,
+Hermite 5689 -> 2026; 2006LE (64 samples) linear 908 -> 673, Hermite 2107 -> 941, Lanczos 2959 -> 2225.
+`mix_ramps` runs at LMUL 8 there (32 lanes at VLEN 128): 274 -> 124 cycles into 2 buses, 744 -> 398 into 7.
+
+What the C920 keeps as it was, measured: the control kernel's fields a word at a time (its segment
+loads and stores, `th.vlxseg` / `th.vsxseg`, cost more: control_le 1085 cycles against 853), and at
+LMUL 1 (LMUL 2: 1090); the filters' plain strided accesses (strided segments 379 against 245; LMUL 8
+481); `peak_ramp` at LMUL 2 (LMUL 8: 265 against 239); the S-YXG50's control kernel stays opt-in (a voice
+0.066 % against 0.062 %).
+
+A voice's share of a C920 core (the Pioneer, 1.875 GHz, 48 kHz, 128 voices; xgbench), the portable
+build / the vector build before / now:
+
+| | Scalar | Before | Now |
+|---|---:|---:|---:|
+| S-YXG50 linear | 0.137 % | 0.085 % | 0.060 % |
+| S-YXG50 Hermite | 0.180 % | 0.124 % | 0.074 % |
+| 2006LE linear | 0.172 % | 0.132 % | 0.122 % |
+| 2006LE Hermite | 0.221 % | 0.194 % | 0.133 % |
+| 2006LE Lanczos-3 | 0.332 % | 0.206 % | 0.185 % |
+
+Checked on the Pioneer: an `HVYXG_ACCEL_EXACT` build's song digests (4 songs, both engines, each
+interpolation) are the earlier C920 build's, bit for bit; and `xgkbench check` runs both resamplers
+against the portable references on random walks (8- and 16-bit waves, odd addresses, steps to 128
+samples a sample, loops and one-shots): the walk exact, the samples within 4.8e-7 of full scale.
+
 **(Superseded) the voices' state in lanes for good.** The per-block state lives in structure-of-arrays form in
 the module (one array per field, indexed by voice object), DspVoice reaching its fields there: the
 kernel then reads and writes unit-stride (16 lanes in a couple of cycles, not 16), over all objects at
@@ -275,8 +312,8 @@ rows live in a per-synth scratch area (128 × kLanes floats: 8 KB at 16 lanes).
   tolerances per form), and the new kernel tests: random descriptors, each kernel against its
   reference.
 - **Per target:** the kernel tests and `render_yxg` renders against the portable build's, within
-  the bounds above -- RVV under qemu at VLEN 128, 256 and 512, XTheadVector on the Pioneer, the A25
-  under rv32emu with the DSP extension and on the Tang.
+  the bounds above -- RVV under qemu at VLEN 128, 256 and 512, XTheadVector on the Pioneer (no qemu
+  runs it: Hira-V's `xgkbench check` there), the A25 under rv32emu with the DSP extension and on the Tang.
 - **Board:** `xgbench` (Hira-V's `apps/bench/xgbench.cpp`): load per voice and per song.
 
 ## Phases

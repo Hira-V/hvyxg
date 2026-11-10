@@ -128,7 +128,6 @@ inline std::size_t span_of(const Walk50& w, std::int32_t inc_int, std::uint32_t 
     return static_cast<std::size_t>(lane_pos(w, inc_int, inc_frac, k + vl - 1) - lane_pos(w, inc_int, inc_frac, k) + 2);
 }
 
-#if !defined(__riscv_xtheadvector)
 // The engines' 4-point Hermite (Catmull-Rom; the S-YXG50's and the 2006LE's are the same) at LMUL 4. The accelerated form (docs/ACCELERATION.md,
 // "speed over exactness"): the same curve as the reference's, c1 = (x1 - xm1) / 2, c3 = 3/2 (x0 - x1) +
 // (x2 - xm1) / 2, c2 = (x1 - x0) - c1 - c3, evaluated with fused multiply-adds -- about 10 operations
@@ -166,7 +165,6 @@ inline vfloat32m4_t hermite_m4(vfloat32m4_t xm1, vfloat32m4_t x0, vfloat32m4_t x
     return __riscv_vfmadd_vv_f32m4(y, t, x0, vl);
 #endif
 }
-#endif
 
 #if !defined(__riscv_xtheadvector)
 // 8-bit samples, linear, at LMUL 4 (64 lanes at VLEN 512): the in-order vector unit's latency per
@@ -455,9 +453,103 @@ __attribute__((noinline)) void segment16_hermite(const Walk50& w, std::int32_t i
 }
 #endif
 
+#if defined(__riscv_xtheadvector)
+// ---- The C920 (XTheadVector, RVV 0.7.1) ----
+// 0.7.1's indexed loads take offsets as wide as their elements, and the C920 traps on a misaligned
+// element (xgkbench align), so the X280's 32-bit offsets to 8- and 16-bit samples, or to unaligned
+// words, are out. Instead each chunk's points are read from the chunk's first point: 8-bit samples by
+// 8-bit offsets (a chunk whose positions span at most 255 samples), 16-bit samples by 16-bit offsets
+// (32767). 0.7.1's offsets are SIGNED (sign-extended, where RVV 1.0's are unsigned), so the base is
+// put in the middle of that range and each offset's top bit flipped: 0 .. 255 becomes -128 .. 127
+// around base + 128. A chunk that spans more has its points filled by the scalar core; the arithmetic
+// is the X280's either way. LMUL 4: 16 lanes at the C920's VLEN 128.
+
+// 8- or 16-bit points as integer-valued floats (the scale once, at the end).
+inline vfloat32m4_t c920_f8(vuint8m1_t u, std::size_t vl) {
+    const vint8m1_t b = __riscv_vreinterpret_v_u8m1_i8m1(__riscv_vxor_vx_u8m1(u, 0x80, vl));
+    return __riscv_vfwcvt_f_x_v_f32m4(__riscv_vwadd_vx_i16m2(b, 0, vl), vl);
+}
+inline vfloat32m4_t c920_f16(vuint16m2_t u, std::size_t vl) {
+    return __riscv_vfwcvt_f_x_v_f32m4(__riscv_vreinterpret_v_u16m2_i16m2(__riscv_vxor_vx_u16m2(u, 0x8000, vl)), vl);
+}
+
+// The S-YXG50's run on the C920: linear or Hermite, 8- or 16-bit.
+template <bool Hermite>
+__attribute__((noinline)) void segment50_c920(const Walk50& w, std::int32_t inc_int, std::uint32_t inc_frac, float* out, std::size_t m) {
+    constexpr std::int32_t lo = Hermite ? 1 : 0;
+    constexpr std::size_t np = Hermite ? 4 : 2;
+    const std::size_t bytes = w.pcm8 ? 1 : 2;
+    const std::uint8_t* base = w.wave + w.loop_start - static_cast<std::ptrdiff_t>(bytes) * w.pre;   // sample -pre
+    const float scale = w.pcm8 ? 1.0f / 128.0f : 1.0f / 32768.0f;
+    for (std::size_t k = 0, vl; k < m; k += vl) {
+        vl = __riscv_vsetvl_e32m4(m - k);
+        const vuint32m4_t kk = __riscv_vadd_vx_u32m4(__riscv_vid_v_u32m4(vl), static_cast<std::uint32_t>(k), vl);
+        const vuint32m4_t flo = __riscv_vmul_vx_u32m4(kk, inc_frac, vl);
+        const vuint32m4_t fhi = __riscv_vmulhu_vx_u32m4(kk, inc_frac, vl);
+        const vuint32m4_t f = __riscv_vadd_vx_u32m4(flo, w.frac, vl);
+        const vbool8_t carry = __riscv_vmsltu_vx_u32m4_b8(f, w.frac, vl);
+        vuint32m4_t whole = __riscv_vadd_vv_u32m4(__riscv_vmul_vx_u32m4(kk, static_cast<std::uint32_t>(inc_int), vl), fhi, vl);
+        whole = __riscv_vadd_vx_u32m4_m(carry, whole, 1, vl);
+        const vfloat32m4_t t = __riscv_vfmul_vf_f32m4(__riscv_vfcvt_f_xu_v_f32m4(f, vl), 1.0f / 4294967296.0f, vl);
+        // the chunk's points from its first: rel = position - p0
+        const std::int32_t p0 = lane_pos(w, inc_int, inc_frac, k);
+        const auto last = static_cast<std::uint32_t>(lane_pos(w, inc_int, inc_frac, k + vl - 1) - p0);
+        const vuint32m4_t rel = __riscv_vsub_vx_u32m4(whole, static_cast<std::uint32_t>(p0 - w.pos), vl);
+        const std::uint8_t* b0 = base + static_cast<std::ptrdiff_t>(bytes) * (p0 + w.pre - lo);
+        vfloat32m4_t xm1, x0, x1, x2;
+        if (w.pcm8 && last <= 255) {
+            const vuint8m1_t r8 = __riscv_vxor_vx_u8m1(__riscv_vnsrl_wx_u8m1(__riscv_vnsrl_wx_u16m2(rel, 0, vl), 0, vl), 0x80, vl);
+            const std::uint8_t* mid = b0 + 128;                          // (signed offsets: see above)
+            if (Hermite) {
+                const vuint8m1x4_t p = __riscv_vluxseg4ei8_v_u8m1x4(mid, r8, vl);
+                xm1 = c920_f8(__riscv_vget_v_u8m1x4_u8m1(p, 0), vl), x0 = c920_f8(__riscv_vget_v_u8m1x4_u8m1(p, 1), vl);
+                x1 = c920_f8(__riscv_vget_v_u8m1x4_u8m1(p, 2), vl), x2 = c920_f8(__riscv_vget_v_u8m1x4_u8m1(p, 3), vl);
+            } else {
+                const vuint8m1x2_t p = __riscv_vluxseg2ei8_v_u8m1x2(mid, r8, vl);
+                x0 = c920_f8(__riscv_vget_v_u8m1x2_u8m1(p, 0), vl), x1 = c920_f8(__riscv_vget_v_u8m1x2_u8m1(p, 1), vl);
+            }
+        } else if (!w.pcm8 && last <= 32767 - np && !(reinterpret_cast<std::uintptr_t>(b0) & 1)) {
+            const std::uint16_t* h0 = reinterpret_cast<const std::uint16_t*>(b0) + 16384;   // (signed offsets)
+            const vuint16m2_t r16 = __riscv_vxor_vx_u16m2(__riscv_vsll_vx_u16m2(__riscv_vnsrl_wx_u16m2(rel, 0, vl), 1, vl), 0x8000, vl);
+            if (Hermite) {
+                const vuint16m2x4_t p = __riscv_vluxseg4ei16_v_u16m2x4(h0, r16, vl);
+                xm1 = c920_f16(__riscv_vget_v_u16m2x4_u16m2(p, 0), vl), x0 = c920_f16(__riscv_vget_v_u16m2x4_u16m2(p, 1), vl);
+                x1 = c920_f16(__riscv_vget_v_u16m2x4_u16m2(p, 2), vl), x2 = c920_f16(__riscv_vget_v_u16m2x4_u16m2(p, 3), vl);
+            } else {
+                const vuint16m2x2_t p = __riscv_vluxseg2ei16_v_u16m2x2(h0, r16, vl);
+                x0 = c920_f16(__riscv_vget_v_u16m2x2_u16m2(p, 0), vl), x1 = c920_f16(__riscv_vget_v_u16m2x2_u16m2(p, 1), vl);
+            }
+        } else {
+            // a chunk too wide for the offsets (or a 16-bit wave at an odd address): the scalar core
+            alignas(64) std::uint32_t r[64];
+            alignas(64) std::uint16_t pts[4][64];
+            __riscv_vse32_v_u32m4(r, rel, vl);
+            for (std::size_t j = 0; j < vl; ++j)
+                for (std::size_t q = 0; q < np; ++q) {
+                    const std::size_t at = bytes * (r[j] + q);
+                    pts[q][j] = w.pcm8 ? b0[at] : static_cast<std::uint16_t>(b0[at] | b0[at + 1] << 8);
+                }
+            const auto pt = [&](std::size_t q) {
+                const vuint16m2_t u = __riscv_vle16_v_u16m2(pts[q], vl);
+                return w.pcm8 ? __riscv_vfwcvt_f_x_v_f32m4(__riscv_vreinterpret_v_u16m2_i16m2(__riscv_vsub_vx_u16m2(u, 0x80, vl)), vl)
+                              : c920_f16(u, vl);
+            };
+            if (Hermite) xm1 = pt(0), x0 = pt(1), x1 = pt(2), x2 = pt(3);
+            else x0 = pt(0), x1 = pt(1);
+        }
+        const vfloat32m4_t y = Hermite ? hermite_m4(xm1, x0, x1, x2, t, vl) : lerp_m4(x0, x1, t, vl);
+        __riscv_vse32_v_f32m4(out + k, __riscv_vfmul_vf_f32m4(y, scale, vl), vl);
+    }
+}
+#endif
+
 // m samples (all with their points inside [-pre, U)) into out, from w's position; w is not advanced.
 void segment(const Walk50& w, std::int32_t inc_int, std::uint32_t inc_frac, bool hermite, float* out, std::size_t m) {
-#if !defined(__riscv_xtheadvector)
+#if defined(__riscv_xtheadvector)
+    if (hermite) segment50_c920<true>(w, inc_int, inc_frac, out, m);
+    else segment50_c920<false>(w, inc_int, inc_frac, out, m);
+    return;
+#else
     if (w.pcm8) {
         if (hermite) segment8_hermite(w, inc_int, inc_frac, out, m);
         else segment8_linear(w, inc_int, inc_frac, out, m);
@@ -596,6 +688,24 @@ void resample50(Walk50& w, std::int32_t inc_int, std::uint32_t inc_frac, bool he
     }
 }
 
+#if defined(__riscv_xtheadvector)
+// The C920: LMUL 8, 32 lanes at its VLEN 128 -- half the cost of LMUL 2 there (xgkbench: 124 cycles a
+// voice into 2 buses against 274, 376 into 7 against 744). The same operations element by element.
+void mix_ramps(const float* x, float* const* dst, const float* g, const float* dg, std::size_t buses, std::size_t n) {
+    if (!buses) return;
+    for (std::size_t i = 0, vl; i < n; i += vl) {
+        vl = __riscv_vsetvl_e32m8(n - i);
+        const vfloat32m8_t xv = __riscv_vle32_v_f32m8(x + i, vl);
+        const vfloat32m8_t iv = __riscv_vfcvt_f_xu_v_f32m8(__riscv_vadd_vx_u32m8(__riscv_vid_v_u32m8(vl), static_cast<std::uint32_t>(i), vl), vl);
+        for (std::size_t b = 0; b < buses; ++b) {
+            // g[b] + i·dg[b], then dst += x · that
+            const vfloat32m8_t gv = __riscv_vfmacc_vf_f32m8(__riscv_vfmv_v_f_f32m8(g[b], vl), dg[b], iv, vl);
+            float* d = dst[b] + i;
+            __riscv_vse32_v_f32m8(d, __riscv_vfmacc_vv_f32m8(__riscv_vle32_v_f32m8(d, vl), xv, gv, vl), vl);
+        }
+    }
+}
+#else
 void mix_ramps(const float* x, float* const* dst, const float* g, const float* dg, std::size_t buses, std::size_t n) {
     if (!buses) return;
     for (std::size_t i = 0, vl; i < n; i += vl) {
@@ -610,6 +720,7 @@ void mix_ramps(const float* x, float* const* dst, const float* g, const float* d
         }
     }
 }
+#endif
 
 namespace {
 
@@ -617,7 +728,9 @@ namespace {
 // words at *s1[l], *s2[l]. Step(x, s1, s2, f, q, vl) -> y updates the state and gives the output; f steps
 // by df after each sample, as the references' do. RVV 1.0 reads and writes four consecutive samples of
 // every lane in one strided segment access (vlsseg4 / vssseg4: a lane's samples are contiguous in its
-// row), instead of an element per sample; 0.7.1 takes the plain strided path.
+// row), instead of an element per sample. XTheadVector has them too (th.vlsseg4e / th.vssseg4e), but
+// on the C920 they cost more than the plain strided accesses (xgkbench: svf_le_lanes 379 cycles a voice
+// against 245), so 0.7.1 takes the plain strided path.
 template <class Step>
 void lanes_filter(float* x, std::size_t stride, float* const* s1, float* const* s2, const float* f, const float* df,
                   const float* q, std::size_t lanes, std::size_t n, Step step) {
@@ -743,8 +856,123 @@ __attribute__((noinline)) void segment_le_m4(const WalkLE& w, std::int32_t inc, 
 }
 #endif
 
+#if defined(__riscv_xtheadvector)
+// The 2006LE's run on the C920 (see segment50_c920): its 16-bit points by 16-bit offsets from the
+// chunk's first point, the arithmetic segment_le_m4's.
+template <bool Hermite>
+__attribute__((noinline)) void segment_le_c920(const WalkLE& w, std::int32_t inc, float* out, std::size_t m) {
+    constexpr std::size_t np = Hermite ? 4 : 2;
+    const std::int16_t* base = w.base + w.pos - (Hermite ? 1 : 0);
+    const auto frac = static_cast<std::uint32_t>(w.frac), uinc = static_cast<std::uint32_t>(inc);
+    for (std::size_t k = 0, vl; k < m; k += vl) {
+        vl = __riscv_vsetvl_e32m4(m - k);
+        const vuint32m4_t acc = __riscv_vadd_vx_u32m4(__riscv_vmul_vx_u32m4(__riscv_vadd_vx_u32m4(__riscv_vid_v_u32m4(vl),
+                                                                            static_cast<std::uint32_t>(k), vl), uinc, vl), frac, vl);
+        const std::uint32_t p0 = (static_cast<std::uint32_t>(k) * uinc + frac) >> kPhaseBitsLE;
+        const std::uint32_t last = ((static_cast<std::uint32_t>(k + vl - 1) * uinc + frac) >> kPhaseBitsLE) - p0;
+        const vuint32m4_t rel = __riscv_vsub_vx_u32m4(__riscv_vsrl_vx_u32m4(acc, kPhaseBitsLE, vl), p0, vl);
+        const vuint32m4_t fr = __riscv_vand_vx_u32m4(acc, (1u << kPhaseBitsLE) - 1, vl);
+        const std::int16_t* b0 = base + p0;
+        const auto cv = [&](vint16m2_t v) { return __riscv_vfwcvt_f_x_v_f32m4(v, vl); };
+        vfloat32m4_t xm1, x0, x1, x2;
+        if (last <= 32767 - np) {
+            const std::int16_t* mid = b0 + 16384;   // signed offsets around it (see segment50_c920)
+            const vuint16m2_t r16 = __riscv_vxor_vx_u16m2(__riscv_vsll_vx_u16m2(__riscv_vnsrl_wx_u16m2(rel, 0, vl), 1, vl), 0x8000, vl);
+            if (Hermite) {
+                const vint16m2x4_t p = __riscv_vluxseg4ei16_v_i16m2x4(mid, r16, vl);
+                xm1 = cv(__riscv_vget_v_i16m2x4_i16m2(p, 0)), x0 = cv(__riscv_vget_v_i16m2x4_i16m2(p, 1));
+                x1 = cv(__riscv_vget_v_i16m2x4_i16m2(p, 2)), x2 = cv(__riscv_vget_v_i16m2x4_i16m2(p, 3));
+            } else {
+                const vint16m2x2_t p = __riscv_vluxseg2ei16_v_i16m2x2(mid, r16, vl);
+                x0 = cv(__riscv_vget_v_i16m2x2_i16m2(p, 0)), x1 = cv(__riscv_vget_v_i16m2x2_i16m2(p, 1));
+            }
+        } else {
+            alignas(64) std::uint32_t r[64];
+            alignas(64) std::int16_t pts[4][64];
+            __riscv_vse32_v_u32m4(r, rel, vl);
+            for (std::size_t j = 0; j < vl; ++j)
+                for (std::size_t q = 0; q < np; ++q) pts[q][j] = b0[r[j] + q];
+            const auto pt = [&](std::size_t q) { return cv(__riscv_vle16_v_i16m2(pts[q], vl)); };
+            if (Hermite) xm1 = pt(0), x0 = pt(1), x1 = pt(2), x2 = pt(3);
+            else x0 = pt(0), x1 = pt(1);
+        }
+        vfloat32m4_t y;
+        if (Hermite) {
+            const vfloat32m4_t t = __riscv_vfmul_vf_f32m4(__riscv_vfcvt_f_xu_v_f32m4(fr, vl), 1.0f / 32768.0f, vl);
+            y = hermite_m4(xm1, x0, x1, x2, t, vl);
+        } else {
+            // w1 = 32 (frac >> 5) / 32768; v = s0 + (s1 - s0) w1
+            const vfloat32m4_t w1 = __riscv_vfmul_vf_f32m4(__riscv_vfcvt_f_xu_v_f32m4(__riscv_vsll_vx_u32m4(__riscv_vsrl_vx_u32m4(fr, 5, vl), 5, vl), vl),
+                                                           1.0f / 32768.0f, vl);
+            y = lerp_m4(x0, x1, w1, vl);
+        }
+        __riscv_vse32_v_f32m4(out + k, y, vl);
+    }
+}
+
+// The 2006LE's Lanczos run on the C920: segment_lanczos_m2's, its six points by 16-bit offsets from
+// the chunk's first (the weights are 32-bit: their own offsets as the X280's). LMUL 2: its six 16-bit
+// points at LMUL 1 are six registers, within a segment's limit of 8.
+__attribute__((noinline)) void segment_lanczos_c920(const WalkLE& w, std::int32_t inc, const float* lanczos, float* out, std::size_t m) {
+    const std::int16_t* base = w.base + w.pos - 2;
+    const auto frac = static_cast<std::uint32_t>(w.frac), uinc = static_cast<std::uint32_t>(inc);
+    for (std::size_t k = 0, vl; k < m; k += vl) {
+        vl = __riscv_vsetvl_e32m2(m - k);
+        const vuint32m2_t acc = __riscv_vadd_vx_u32m2(__riscv_vmul_vx_u32m2(__riscv_vadd_vx_u32m2(__riscv_vid_v_u32m2(vl),
+                                                                            static_cast<std::uint32_t>(k), vl), uinc, vl), frac, vl);
+        const std::uint32_t p0 = (static_cast<std::uint32_t>(k) * uinc + frac) >> kPhaseBitsLE;
+        const std::uint32_t last = ((static_cast<std::uint32_t>(k + vl - 1) * uinc + frac) >> kPhaseBitsLE) - p0;
+        const vuint32m2_t rel = __riscv_vsub_vx_u32m2(__riscv_vsrl_vx_u32m2(acc, kPhaseBitsLE, vl), p0, vl);
+        const vuint32m2_t row = __riscv_vsrl_vx_u32m2(__riscv_vadd_vx_u32m2(__riscv_vand_vx_u32m2(acc, (1u << kPhaseBitsLE) - 1, vl), 64, vl), 7, vl);
+        const vuint32m2_t woff = __riscv_vmul_vx_u32m2(row, 6 * sizeof(float), vl);                          // bytes
+        const vfloat32m2x3_t wa = __riscv_vluxseg3ei32_v_f32m2x3(lanczos, woff, vl);
+        const vfloat32m2x3_t wb = __riscv_vluxseg3ei32_v_f32m2x3(lanczos + 3, woff, vl);
+        const std::int16_t* b0 = base + p0;
+        const auto pt = [&](vint16m1_t v) { return __riscv_vfwcvt_f_x_v_f32m2(v, vl); };
+        vfloat32m2_t p0v, p1, p2, p3, p4, p5;
+        if (last <= 32767 - 6) {
+            const vuint16m1_t r16 = __riscv_vxor_vx_u16m1(__riscv_vsll_vx_u16m1(__riscv_vnsrl_wx_u16m1(rel, 0, vl), 1, vl), 0x8000, vl);
+            const vint16m1x6_t p6 = __riscv_vluxseg6ei16_v_i16m1x6(b0 + 16384, r16, vl);   // signed offsets (segment50_c920)
+            p0v = pt(__riscv_vget_v_i16m1x6_i16m1(p6, 0)), p1 = pt(__riscv_vget_v_i16m1x6_i16m1(p6, 1));
+            p2 = pt(__riscv_vget_v_i16m1x6_i16m1(p6, 2)), p3 = pt(__riscv_vget_v_i16m1x6_i16m1(p6, 3));
+            p4 = pt(__riscv_vget_v_i16m1x6_i16m1(p6, 4)), p5 = pt(__riscv_vget_v_i16m1x6_i16m1(p6, 5));
+        } else {
+            alignas(64) std::uint32_t r[32];
+            alignas(64) std::int16_t pts[6][32];
+            __riscv_vse32_v_u32m2(r, rel, vl);
+            for (std::size_t j = 0; j < vl; ++j)
+                for (std::size_t q = 0; q < 6; ++q) pts[q][j] = b0[r[j] + q];
+            p0v = pt(__riscv_vle16_v_i16m1(pts[0], vl)), p1 = pt(__riscv_vle16_v_i16m1(pts[1], vl));
+            p2 = pt(__riscv_vle16_v_i16m1(pts[2], vl)), p3 = pt(__riscv_vle16_v_i16m1(pts[3], vl));
+            p4 = pt(__riscv_vle16_v_i16m1(pts[4], vl)), p5 = pt(__riscv_vle16_v_i16m1(pts[5], vl));
+        }
+        const vfloat32m2_t w0 = __riscv_vget_v_f32m2x3_f32m2(wa, 0), w1 = __riscv_vget_v_f32m2x3_f32m2(wa, 1), w2 = __riscv_vget_v_f32m2x3_f32m2(wa, 2);
+        const vfloat32m2_t w3 = __riscv_vget_v_f32m2x3_f32m2(wb, 0), w4 = __riscv_vget_v_f32m2x3_f32m2(wb, 1), w5 = __riscv_vget_v_f32m2x3_f32m2(wb, 2);
+        vfloat32m2_t y = __riscv_vfmul_vv_f32m2(w0, p0v, vl);
+#if defined(HVYXG_ACCEL_EXACT)
+        y = __riscv_vfadd_vv_f32m2(y, __riscv_vfmul_vv_f32m2(w1, p1, vl), vl);
+        y = __riscv_vfadd_vv_f32m2(y, __riscv_vfmul_vv_f32m2(w2, p2, vl), vl);
+        y = __riscv_vfadd_vv_f32m2(y, __riscv_vfmul_vv_f32m2(w3, p3, vl), vl);
+        y = __riscv_vfadd_vv_f32m2(y, __riscv_vfmul_vv_f32m2(w4, p4, vl), vl);
+        y = __riscv_vfadd_vv_f32m2(y, __riscv_vfmul_vv_f32m2(w5, p5, vl), vl);
+#else
+        y = __riscv_vfmacc_vv_f32m2(y, w1, p1, vl);
+        y = __riscv_vfmacc_vv_f32m2(y, w2, p2, vl);
+        y = __riscv_vfmacc_vv_f32m2(y, w3, p3, vl);
+        y = __riscv_vfmacc_vv_f32m2(y, w4, p4, vl);
+        y = __riscv_vfmacc_vv_f32m2(y, w5, p5, vl);
+#endif
+        __riscv_vse32_v_f32m2(out + k, y, vl);
+    }
+}
+#endif
+
 void segment_le(const WalkLE& w, std::int32_t inc, bool hermite, float* out, std::size_t m) {
-#if !defined(__riscv_xtheadvector)
+#if defined(__riscv_xtheadvector)
+    if (hermite) segment_le_c920<true>(w, inc, out, m);
+    else segment_le_c920<false>(w, inc, out, m);
+    return;
+#else
     segment_le_m4(w, inc, hermite, out, m);
     return;
 #endif
@@ -839,7 +1067,10 @@ __attribute__((noinline)) void segment_lanczos_m2(const WalkLE& w, std::int32_t 
 #endif
 
 void segment_lanczos(const WalkLE& w, std::int32_t inc, const float* lanczos, float* out, std::size_t m) {
-#if !defined(__riscv_xtheadvector)
+#if defined(__riscv_xtheadvector)
+    segment_lanczos_c920(w, inc, lanczos, out, m);
+    return;
+#else
     segment_lanczos_m2(w, inc, lanczos, out, m);
     return;
 #endif

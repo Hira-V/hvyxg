@@ -62,7 +62,9 @@ inline vf eg_gain(vi x, std::size_t vl) {
 }
 
 /// Lane access to the voices: runs of consecutive 32-bit words at an offset in each lane's voice
-/// (base + at), as one indexed segment load or store (RVV 1.0), or a word at a time (XTheadVector).
+/// (base + at), as one indexed segment load or store (RVV 1.0), or a word at a time (XTheadVector:
+/// its th.vlxseg / th.vsxseg cost the C920 more than the words do -- xgkbench's control_le 1085 cycles a
+/// voice against 863).
 inline vu idx(vu at, std::uint32_t off, std::size_t vl) { return __riscv_vadd_vx_u32m1(at, off, vl); }
 inline vi vgi(const std::uint8_t* base, vu at, std::uint32_t off, std::size_t vl) {
     return __riscv_vluxei32_v_i32m1(reinterpret_cast<const std::int32_t*>(base), idx(at, off, vl), vl);
